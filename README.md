@@ -33,14 +33,28 @@ tests/            — Test suite
 
 - Python 3.9+
 - ffmpeg on `PATH` (required for codec normalisation and equirectangular conversion)
+- **Linux**: `tkinter` is not bundled in the virtualenv — install the system package first:
+  ```bash
+  sudo apt install python3-tk      # Debian / Ubuntu / Raspberry Pi OS
+  sudo dnf install python3-tkinter # Fedora / RHEL
+  ```
 
 ### Install
 
 ```bash
 git clone <repo>
 cd 360-Video-Manager
+
+# Activate the virtualenv that ships with the repo
+source bin/activate          # Linux / macOS
+# bin\activate.ps1            # Windows PowerShell
+
 pip install -r requirements.txt
 ```
+
+> **Important**: all subsequent commands must be run from the project root
+> (`360-Video-Manager/`) with the virtualenv active, otherwise Python cannot
+> locate the `app`, `config`, `core`, and `workflows` packages.
 
 ### Configure
 

@@ -1,4 +1,4 @@
-"""Tkinter GUI for 360-Video-Manager.
+"""CustomTkinter GUI for 360-Video-Manager.
 
 The GUI orchestrates operations by delegating to the unified workflow layer
 (:mod:`workflows.unified_pipeline`).  No pipeline logic lives here — all
@@ -8,300 +8,759 @@ delivered back to the main thread via ``master.after()``.
 
 from __future__ import annotations
 
+import enum
+import io
 import logging
-import os
 import threading
-import tkinter as tk
-from tkinter import messagebox, ttk
-from typing import List, Optional
+import tkinter
+import tkinter.messagebox
+import urllib.request
+from typing import Any, Dict, List, Optional
+
+import customtkinter as ctk
+from PIL import Image
 
 from config.logging_config import setup_logging
 from config.settings import get_settings
 from utils.exceptions import (
-    DownloadError,
     MediaCMSError,
-    WorkflowError,
+    NoYouTubeAPIKeyError,
     YouTubeAPIError,
 )
-from workflows.unified_pipeline import JobOptions, process_video_job
-
 
 logger = logging.getLogger(__name__)
 
+# ── Appearance ────────────────────────────────────────────────────────────────
+ctk.set_appearance_mode("light")
+ctk.set_default_color_theme("blue")
+
+# ── Layout constants ──────────────────────────────────────────────────────────
+_THUMB_CARD   = (120, 68)
+_THUMB_DETAIL = (320, 180)
+_PAGE_SIZE    = 5
+_ACCENT       = "#1a7fd4"
+
+
+# ── App state ─────────────────────────────────────────────────────────────────
+
+class AppState(enum.Enum):
+    IDLE       = "idle"
+    SEARCHING  = "searching"
+    READY      = "ready"
+    PROCESSING = "processing"
+    PROCESSED  = "processed"
+    UPLOADING  = "uploading"
+
+
+# search_btn / dl_btn / up_btn
+_STATE_BUTTONS: Dict[AppState, tuple] = {
+    AppState.IDLE:       ("normal",   "disabled", "disabled"),
+    AppState.SEARCHING:  ("disabled", "disabled", "disabled"),
+    AppState.READY:      ("normal",   "normal",   "disabled"),
+    AppState.PROCESSING: ("disabled", "disabled", "disabled"),
+    AppState.PROCESSED:  ("normal",   "normal",   "normal"),
+    AppState.UPLOADING:  ("disabled", "disabled", "disabled"),
+}
+
+
+# ── Log handler ───────────────────────────────────────────────────────────────
+
+class GUILogHandler(logging.Handler):
+    """Appends log records to a CTkTextbox via root.after() — always thread-safe."""
+
+    def __init__(self, textbox: ctk.CTkTextbox, root: ctk.CTk) -> None:
+        super().__init__()
+        self._box  = textbox
+        self._root = root
+        self.setFormatter(logging.Formatter(
+            "%(asctime)s [%(levelname)-8s] %(name)s — %(message)s",
+            datefmt="%H:%M:%S",
+        ))
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            msg = self.format(record) + "\n"
+            self._root.after(0, lambda m=msg: self._append(m))
+        except Exception:
+            self.handleError(record)
+
+    def _append(self, msg: str) -> None:
+        self._box.configure(state="normal")
+        self._box.insert("end", msg)
+        self._box.see("end")
+        self._box.configure(state="disabled")
+
+
+# ── Thumbnail helpers ─────────────────────────────────────────────────────────
+
+def _fetch_thumbnail(video_id: str, size: tuple) -> Optional[ctk.CTkImage]:
+    """Download a YouTube thumbnail and return a CTkImage, or None on failure."""
+    from core.youtube import get_video_thumbnail_urls
+    urls = get_video_thumbnail_urls(video_id)
+    for key in ("mqdefault", "hqdefault", "sddefault", "default"):
+        url = urls.get(key, "")
+        if not url:
+            continue
+        try:
+            with urllib.request.urlopen(url, timeout=6) as r:
+                data = r.read()
+            img = Image.open(io.BytesIO(data)).convert("RGB")
+            return ctk.CTkImage(light_image=img, size=size)
+        except Exception:
+            continue
+    return None
+
+
+def _grey_image(size: tuple) -> ctk.CTkImage:
+    """Return a neutral grey placeholder CTkImage."""
+    img = Image.new("RGB", size, color=(210, 210, 210))
+    return ctk.CTkImage(light_image=img, size=size)
+
+
+# ── Main application ──────────────────────────────────────────────────────────
 
 class VR360ManagerApp:
-    """Main Tkinter application window for VR360 Media Manager."""
+    """Main CustomTkinter application window for VR360 Media Manager."""
 
-    def __init__(self, master: tk.Tk) -> None:
+    def __init__(self, master: ctk.CTk) -> None:
         self.master = master
         self.master.title("VR360 Media Manager")
-        self.master.geometry("960x620")
+        self.master.geometry("1000x760")
+        self.master.minsize(700, 560)
 
-        cfg = get_settings()
-        cfg.ensure_runtime_dirs()
+        get_settings().ensure_runtime_dirs()
 
-        self.search_results: List[dict] = []
-        self.video_path: Optional[str] = None
-
-        self.status_var = tk.StringVar(value="Ready")
-        self.search_var = tk.StringVar()
-        self.title_var = tk.StringVar()
-        self.playlist_var = tk.StringVar()
-        self.desc_text: Optional[tk.Text] = None
+        # ── Runtime state ──
+        self._state:        AppState              = AppState.IDLE
+        self._results:      List[Dict[str, Any]]  = []
+        self._max_results:  int                   = _PAGE_SIZE
+        self._selected:     Optional[Dict]        = None
+        self._ready_path:   Optional[str]         = None
+        self._cards:        List[ctk.CTkFrame]    = []
+        self._res_children: List                  = []   # all widgets in results_frame
+        self._playlists:    List[Dict]            = []
+        self._log_visible:  bool                  = False
+        self._status_var  = tkinter.StringVar(value="Ready")
 
         self._build_ui()
+        self._attach_log_handler()
 
-    # ------------------------------------------------------------------ #
-    # UI construction
-    # ------------------------------------------------------------------ #
+        # Pre-load playlists from CMS
+        threading.Thread(target=self._bg_load_playlists, daemon=True).start()
+
+    # ── UI construction ───────────────────────────────────────────────────────
 
     def _build_ui(self) -> None:
-        main = ttk.Frame(self.master, padding=12)
-        main.pack(fill=tk.BOTH, expand=True)
+        root_frame = ctk.CTkFrame(self.master, fg_color="transparent")
+        root_frame.pack(fill="both", expand=True, padx=16, pady=12)
 
-        # --- Search row ---
-        search_row = ttk.Frame(main)
-        search_row.pack(fill=tk.X, pady=(0, 10))
+        # ── Search row ──
+        search_row = ctk.CTkFrame(root_frame, fg_color="transparent")
+        search_row.pack(fill="x", pady=(0, 8))
 
-        ttk.Label(search_row, text="Search YouTube:").pack(side=tk.LEFT)
-        search_entry = ttk.Entry(search_row, textvariable=self.search_var)
-        search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=8)
-        search_entry.bind("<Return>", lambda _e: self._on_search())
-        ttk.Button(search_row, text="Search", command=self._on_search).pack(side=tk.LEFT)
-
-        # --- Results list ---
-        list_frame = ttk.Frame(main)
-        list_frame.pack(fill=tk.BOTH, expand=True)
-
-        self.results_list = tk.Listbox(list_frame, height=12)
-        self.results_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.results_list.yview)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.results_list.config(yscrollcommand=scrollbar.set)
-
-        # --- Action buttons ---
-        actions = ttk.Frame(main)
-        actions.pack(fill=tk.X, pady=10)
-        ttk.Button(
-            actions, text="Download selected", command=self._on_download_selected
-        ).pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Button(
-            actions, text="Detect & convert projection", command=self._on_detect
-        ).pack(side=tk.LEFT)
-
-        # --- Upload form ---
-        upload_frame = ttk.LabelFrame(main, text="Upload to MediaCMS", padding=8)
-        upload_frame.pack(fill=tk.X, pady=(8, 0))
-
-        ttk.Label(upload_frame, text="Title:").grid(row=0, column=0, sticky="w")
-        ttk.Entry(upload_frame, textvariable=self.title_var).grid(
-            row=0, column=1, sticky="ew", padx=6
+        self._search_entry = ctk.CTkEntry(
+            search_row,
+            placeholder_text="Search YouTube for 360° videos…",
+            height=38,
         )
+        self._search_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        self._search_entry.bind("<Return>", lambda _: self._on_search())
 
-        ttk.Label(upload_frame, text="Playlist (optional):").grid(row=1, column=0, sticky="w")
-        ttk.Entry(upload_frame, textvariable=self.playlist_var).grid(
-            row=1, column=1, sticky="ew", padx=6
+        self._search_btn = ctk.CTkButton(
+            search_row, text="Search", width=100, height=38,
+            command=self._on_search,
         )
+        self._search_btn.pack(side="left")
 
-        ttk.Label(upload_frame, text="Description:").grid(row=2, column=0, sticky="nw")
-        self.desc_text = tk.Text(upload_frame, height=4)
-        self.desc_text.grid(row=2, column=1, sticky="ew", padx=6, pady=(0, 4))
+        # ── Results ──
+        ctk.CTkLabel(
+            root_frame, text="Results",
+            font=ctk.CTkFont(size=13, weight="bold"), anchor="w",
+        ).pack(fill="x", pady=(4, 2))
 
-        ttk.Button(upload_frame, text="Upload", command=self._on_upload).grid(
-            row=3, column=1, sticky="e"
+        self._results_frame = ctk.CTkScrollableFrame(root_frame, height=220)
+        self._results_frame.pack(fill="x")
+
+        # Container for "Show more" — always in layout; child shown/hidden
+        _sm_cont = ctk.CTkFrame(root_frame, fg_color="transparent")
+        _sm_cont.pack(fill="x")
+        self._show_more_btn = ctk.CTkButton(
+            _sm_cont,
+            text="Show more results",
+            height=28,
+            fg_color="transparent",
+            border_width=1,
+            text_color=("gray20", "gray80"),
+            command=self._on_show_more,
         )
-        upload_frame.columnconfigure(1, weight=1)
+        # Not packed yet — shown only when a full page was returned
 
-        # --- Status bar ---
-        status_bar = ttk.Label(main, textvariable=self.status_var, anchor="w", relief="sunken")
-        status_bar.pack(fill=tk.X, pady=(8, 0))
+        # ── Selected video panel ──
+        ctk.CTkLabel(
+            root_frame, text="Selected video",
+            font=ctk.CTkFont(size=13, weight="bold"), anchor="w",
+        ).pack(fill="x", pady=(10, 2))
 
-    # ------------------------------------------------------------------ #
-    # Helper methods
-    # ------------------------------------------------------------------ #
+        detail = ctk.CTkFrame(
+            root_frame, corner_radius=8,
+            border_width=1, border_color=("gray80", "gray30"),
+        )
+        detail.pack(fill="x")
+
+        self._detail_thumb = ctk.CTkLabel(
+            detail, text="",
+            image=_grey_image(_THUMB_DETAIL),
+            width=_THUMB_DETAIL[0], height=_THUMB_DETAIL[1],
+        )
+        self._detail_thumb.pack(side="left", padx=12, pady=10)
+
+        info = ctk.CTkFrame(detail, fg_color="transparent")
+        info.pack(side="left", fill="both", expand=True, padx=(0, 12), pady=10)
+
+        self._detail_title_lbl = ctk.CTkLabel(
+            info, text="No video selected",
+            font=ctk.CTkFont(size=15, weight="bold"),
+            anchor="w", wraplength=540,
+        )
+        self._detail_title_lbl.pack(fill="x")
+
+        self._detail_channel_lbl = ctk.CTkLabel(
+            info, text="", anchor="w",
+            text_color=("gray45", "gray60"),
+        )
+        self._detail_channel_lbl.pack(fill="x", pady=(4, 0))
+
+        self._detail_url_lbl = ctk.CTkLabel(
+            info, text="", anchor="w",
+            font=ctk.CTkFont(size=11),
+            text_color=("gray45", "gray60"),
+        )
+        self._detail_url_lbl.pack(fill="x", pady=(2, 0))
+
+        # ── Upload options ──
+        ctk.CTkLabel(
+            root_frame, text="Upload options",
+            font=ctk.CTkFont(size=13, weight="bold"), anchor="w",
+        ).pack(fill="x", pady=(10, 2))
+
+        upload_opts = ctk.CTkFrame(
+            root_frame, corner_radius=8,
+            border_width=1, border_color=("gray80", "gray30"),
+        )
+        upload_opts.pack(fill="x")
+        upload_opts.columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(upload_opts, text="Title:").grid(
+            row=0, column=0, padx=(12, 6), pady=(10, 4), sticky="w")
+        self._title_entry = ctk.CTkEntry(
+            upload_opts, placeholder_text="Video title…", height=32)
+        self._title_entry.grid(
+            row=0, column=1, columnspan=2, padx=(0, 12), pady=(10, 4), sticky="ew")
+
+        ctk.CTkLabel(upload_opts, text="Playlist:").grid(
+            row=1, column=0, padx=(12, 6), pady=(4, 10), sticky="w")
+        self._playlist_var = tkinter.StringVar(value="— no playlist —")
+        self._playlist_menu = ctk.CTkOptionMenu(
+            upload_opts,
+            variable=self._playlist_var,
+            values=["— no playlist —"],
+            width=300,
+            dynamic_resizing=False,
+        )
+        self._playlist_menu.grid(row=1, column=1, padx=(0, 6), pady=(4, 10), sticky="w")
+        ctk.CTkButton(
+            upload_opts, text="＋ New…", width=72,
+            command=self._on_new_playlist,
+        ).grid(row=1, column=2, padx=(0, 12), pady=(4, 10))
+
+        # ── Action buttons ──
+        actions = ctk.CTkFrame(root_frame, fg_color="transparent")
+        actions.pack(fill="x", pady=(10, 4))
+
+        self._dl_btn = ctk.CTkButton(
+            actions,
+            text="⬇  Download & Process",
+            height=42,
+            font=ctk.CTkFont(size=14, weight="bold"),
+            state="disabled",
+            command=self._on_download_process,
+        )
+        self._dl_btn.pack(side="left", fill="x", expand=True, padx=(0, 6))
+
+        self._up_btn = ctk.CTkButton(
+            actions,
+            text="⬆  Upload to CMS",
+            height=42,
+            font=ctk.CTkFont(size=14, weight="bold"),
+            fg_color=("gray65", "gray35"),
+            hover_color=("gray55", "gray45"),
+            state="disabled",
+            command=self._on_upload,
+        )
+        self._up_btn.pack(side="left", fill="x", expand=True, padx=(6, 0))
+
+        # ── Progress bar ──
+        self._progress = ctk.CTkProgressBar(root_frame, height=10)
+        self._progress.pack(fill="x", pady=(8, 2))
+        self._progress.set(0)
+
+        # ── Status label ──
+        self._status_lbl = ctk.CTkLabel(
+            root_frame, textvariable=self._status_var,
+            anchor="w", font=ctk.CTkFont(size=12),
+        )
+        self._status_lbl.pack(fill="x")
+
+        # ── Log toggle ──
+        self._log_toggle_btn = ctk.CTkButton(
+            root_frame,
+            text="▶  Show log",
+            fg_color="transparent",
+            text_color=("gray45", "gray65"),
+            font=ctk.CTkFont(size=11),
+            anchor="w",
+            height=22,
+            command=self._toggle_log,
+        )
+        self._log_toggle_btn.pack(fill="x", pady=(4, 0))
+
+        # ── Log panel (inside a container; container always packed) ──
+        self._log_container = ctk.CTkFrame(root_frame, fg_color="transparent")
+        self._log_container.pack(fill="x")
+        self._log_box = ctk.CTkTextbox(
+            self._log_container,
+            height=120,
+            state="disabled",
+            font=ctk.CTkFont(family="monospace", size=11),
+        )
+        # Not packed until toggled on
+
+    def _attach_log_handler(self) -> None:
+        handler = GUILogHandler(self._log_box, self.master)
+        handler.setLevel(logging.DEBUG)
+        logging.getLogger().addHandler(handler)
+
+    # ── State machine ─────────────────────────────────────────────────────────
+
+    def _set_state(self, state: AppState) -> None:
+        self._state = state
+        s_s, dl_s, up_s = _STATE_BUTTONS[state]
+        self._search_btn.configure(state=s_s)
+        self._search_entry.configure(state=s_s)
+        self._dl_btn.configure(state=dl_s)
+        self._up_btn.configure(state=up_s)
 
     def _set_status(self, text: str) -> None:
-        self.status_var.set(text)
+        self._status_var.set(text)
 
-    def _get_selected(self) -> Optional[dict]:
-        sel = self.results_list.curselection()
-        if not sel:
-            return None
-        idx = sel[0]
-        if 0 <= idx < len(self.search_results):
-            return self.search_results[idx]
-        return None
+    # ── Log toggle ────────────────────────────────────────────────────────────
 
-    # ------------------------------------------------------------------ #
-    # Event handlers
-    # ------------------------------------------------------------------ #
+    def _toggle_log(self) -> None:
+        self._log_visible = not self._log_visible
+        if self._log_visible:
+            self._log_box.pack(fill="x", pady=(2, 0))
+            self._log_toggle_btn.configure(text="▼  Hide log")
+        else:
+            self._log_box.pack_forget()
+            self._log_toggle_btn.configure(text="▶  Show log")
+
+    # ── Search ────────────────────────────────────────────────────────────────
 
     def _on_search(self) -> None:
-        query = self.search_var.get().strip()
+        query = self._search_entry.get().strip()
         if not query:
-            messagebox.showwarning("Warning", "Enter a search query.")
+            tkinter.messagebox.showwarning("Warning", "Enter a search query.")
             return
-        self._set_status("Searching...")
-        threading.Thread(target=self._search_thread, args=(query,), daemon=True).start()
+        self._max_results = _PAGE_SIZE
+        self._set_state(AppState.SEARCHING)
+        self._set_status("Searching…")
+        self._progress.configure(mode="indeterminate")
+        self._progress.start()
+        threading.Thread(
+            target=self._bg_search, args=(query, self._max_results), daemon=True,
+        ).start()
 
-    def _search_thread(self, query: str) -> None:
+    def _on_show_more(self) -> None:
+        query = self._search_entry.get().strip()
+        if not query:
+            return
+        self._max_results += _PAGE_SIZE
+        self._set_state(AppState.SEARCHING)
+        self._set_status("Loading more results…")
+        self._progress.configure(mode="indeterminate")
+        self._progress.start()
+        threading.Thread(
+            target=self._bg_search, args=(query, self._max_results), daemon=True,
+        ).start()
+
+    def _bg_search(self, query: str, max_results: int) -> None:
         from core.youtube import search_videos
         try:
-            results = search_videos(query)
-            self.search_results = results
-            self.master.after(0, self._update_results_list)
-            self.master.after(
-                0, lambda: self._set_status(f"Found {len(results)} 360° video(s).")
-            )
-        except Exception as exc:
-            self.master.after(
-                0, lambda: messagebox.showerror("Search error", str(exc))
-            )
-            self.master.after(0, lambda: self._set_status("Search failed."))
-
-    def _update_results_list(self) -> None:
-        self.results_list.delete(0, tk.END)
-        for item in self.search_results:
-            title = item.get("title") or "No title"
-            channel = item.get("channel") or "Unknown channel"
-            self.results_list.insert(tk.END, f"{title} | {channel}")
-
-    def _on_download_selected(self) -> None:
-        selected = self._get_selected()
-        if not selected:
-            messagebox.showwarning("Warning", "Select a video first.")
+            results = search_videos(query, max_results=max_results)
+        except (NoYouTubeAPIKeyError, YouTubeAPIError, Exception) as exc:
+            self.master.after(0, lambda e=str(exc): self._on_search_error(e))
             return
-        url = selected.get("url")
+        self.master.after(0, lambda r=results: self._on_search_done(r))
+
+    def _on_search_done(self, results: List[Dict]) -> None:
+        self._progress.stop()
+        self._progress.configure(mode="determinate")
+        self._progress.set(0)
+        self._results = results
+        self._render_cards(results)
+        n = len(results)
+        self._set_status(f"Found {n} 360° video{'s' if n != 1 else ''}.")
+        if n >= self._max_results:
+            self._show_more_btn.pack(pady=(4, 2))
+        else:
+            self._show_more_btn.pack_forget()
+        self._set_state(AppState.IDLE)
+
+    def _on_search_error(self, msg: str) -> None:
+        self._progress.stop()
+        self._progress.configure(mode="determinate")
+        self._progress.set(0)
+        self._set_state(AppState.IDLE)
+        self._set_status("Search failed.")
+        tkinter.messagebox.showerror("Search error", msg)
+
+    # ── Results cards ─────────────────────────────────────────────────────────
+
+    def _render_cards(self, results: List[Dict]) -> None:
+        """Destroy existing cards and render fresh ones."""
+        for w in self._res_children:
+            try:
+                w.destroy()
+            except Exception:
+                pass
+        self._res_children.clear()
+        self._cards.clear()
+        self._selected   = None
+        self._ready_path = None
+
+        if not results:
+            lbl = ctk.CTkLabel(
+                self._results_frame,
+                text="No 360° videos found. Try a different query.",
+                text_color=("gray50", "gray50"),
+            )
+            lbl.pack(pady=16)
+            self._res_children.append(lbl)
+            return
+
+        for item in results:
+            self._add_card(item)
+
+    def _add_card(self, item: Dict) -> None:
+        card = ctk.CTkFrame(
+            self._results_frame,
+            height=_THUMB_CARD[1] + 12,
+            corner_radius=6,
+            border_width=1,
+            border_color=("gray80", "gray30"),
+            cursor="hand2",
+        )
+        card.pack(fill="x", pady=3, padx=2)
+        card.pack_propagate(False)
+        self._cards.append(card)
+        self._res_children.append(card)
+
+        ph = _grey_image(_THUMB_CARD)
+        thumb_lbl = ctk.CTkLabel(
+            card, text="", image=ph,
+            width=_THUMB_CARD[0], height=_THUMB_CARD[1],
+        )
+        thumb_lbl.pack(side="left", padx=(8, 8), pady=6)
+
+        txt = ctk.CTkFrame(card, fg_color="transparent")
+        txt.pack(side="left", fill="both", expand=True, pady=8, padx=(0, 8))
+
+        title_lbl = ctk.CTkLabel(
+            txt,
+            text=item.get("title") or "Untitled",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            anchor="w", wraplength=600,
+        )
+        title_lbl.pack(fill="x")
+
+        ch_lbl = ctk.CTkLabel(
+            txt,
+            text=f"{item.get('channel') or 'Unknown'}  ·  360°",
+            anchor="w",
+            font=ctk.CTkFont(size=11),
+            text_color=("gray45", "gray60"),
+        )
+        ch_lbl.pack(fill="x")
+
+        # Bind click on every widget inside the card
+        for widget in (card, thumb_lbl, txt, title_lbl, ch_lbl):
+            widget.bind("<Button-1>",
+                        lambda _, i=item, c=card: self._on_card_click(i, c))
+
+        vid_id = item.get("id")
+        if vid_id:
+            threading.Thread(
+                target=self._bg_card_thumb,
+                args=(vid_id, thumb_lbl),
+                daemon=True,
+            ).start()
+
+    def _bg_card_thumb(self, video_id: str, lbl: ctk.CTkLabel) -> None:
+        img = _fetch_thumbnail(video_id, _THUMB_CARD)
+        if img:
+            self.master.after(0, lambda i=img: lbl.configure(image=i))
+
+    def _on_card_click(self, item: Dict, clicked: ctk.CTkFrame) -> None:
+        # Same card clicked again — nothing to do
+        if self._selected and self._selected.get("id") == item.get("id"):
+            return
+        for c in self._cards:
+            c.configure(border_color=("gray80", "gray30"))
+        clicked.configure(border_color=(_ACCENT, _ACCENT))
+        self._selected   = item
+        self._ready_path = None  # new selection clears any prior download
+        self._update_detail(item)
+        if self._state not in (AppState.PROCESSING, AppState.UPLOADING, AppState.SEARCHING):
+            self._set_state(AppState.READY)
+
+    def _update_detail(self, item: Dict) -> None:
+        title = item.get("title") or "Untitled"
+        self._detail_title_lbl.configure(text=title)
+        self._detail_channel_lbl.configure(text=item.get("channel") or "")
+        self._detail_url_lbl.configure(text=item.get("url") or "")
+        self._detail_thumb.configure(image=_grey_image(_THUMB_DETAIL))
+        self._title_entry.delete(0, "end")
+        self._title_entry.insert(0, title)
+        vid_id = item.get("id")
+        if vid_id:
+            threading.Thread(
+                target=self._bg_detail_thumb, args=(vid_id,), daemon=True
+            ).start()
+
+    def _bg_detail_thumb(self, video_id: str) -> None:
+        img = _fetch_thumbnail(video_id, _THUMB_DETAIL)
+        if img:
+            self.master.after(0, lambda i=img: self._detail_thumb.configure(image=i))
+
+    # ── Playlists ─────────────────────────────────────────────────────────────
+
+    def _bg_load_playlists(self) -> None:
+        from core.uploader import get_playlists
+        try:
+            playlists = get_playlists()
+        except Exception as exc:
+            logger.debug("Playlist load failed: %s", exc)
+            playlists = []
+        self.master.after(0, lambda p=playlists: self._set_playlists(p))
+
+    def _set_playlists(self, playlists: List[Dict]) -> None:
+        self._playlists = playlists
+        values = ["— no playlist —"] + [
+            str(p.get("title") or p.get("id") or f"Playlist {i + 1}")
+            for i, p in enumerate(playlists)
+        ]
+        self._playlist_menu.configure(values=values)
+        self._playlist_var.set("— no playlist —")
+
+    def _get_playlist_id(self) -> Optional[str]:
+        chosen = self._playlist_var.get()
+        if chosen == "— no playlist —":
+            return None
+        for p in self._playlists:
+            label = str(p.get("title") or p.get("id") or "")
+            if label == chosen:
+                return str(p.get("id") or "")
+        return None
+
+    def _on_new_playlist(self) -> None:
+        dialog = ctk.CTkInputDialog(
+            text="Enter a name for the new playlist:",
+            title="New Playlist",
+        )
+        name = dialog.get_input()
+        if name and name.strip():
+            threading.Thread(
+                target=self._bg_create_playlist, args=(name.strip(),), daemon=True,
+            ).start()
+
+    def _bg_create_playlist(self, name: str) -> None:
+        from core.uploader import create_playlist
+        try:
+            new_id = create_playlist(name)
+            if new_id:
+                logger.info("Created playlist %r (id=%s)", name, new_id)
+        except Exception as exc:
+            logger.warning("Could not create playlist: %s", exc)
+        self._bg_load_playlists()
+
+    # ── Download & Process ────────────────────────────────────────────────────
+
+    def _on_download_process(self) -> None:
+        if not self._selected:
+            tkinter.messagebox.showwarning("Warning", "Select a video first.")
+            return
+        url = self._selected.get("url")
         if not url:
-            messagebox.showerror("Error", "Selected result has no URL.")
+            tkinter.messagebox.showerror("Error", "Selected video has no URL.")
             return
-        self.title_var.set(selected.get("title") or "")
-        self._set_status("Downloading…")
-        threading.Thread(target=self._download_thread, args=(url,), daemon=True).start()
+        self._ready_path = None
+        self._set_state(AppState.PROCESSING)
+        self._set_status("Starting download…")
+        self._progress.set(0)
+        threading.Thread(target=self._bg_process, args=(url,), daemon=True).start()
 
-    def _download_thread(self, url: str) -> None:
-        from core.downloader import download_video
+    def _bg_process(self, url: str) -> None:
+        from workflows.unified_pipeline import JobOptions, process_video_job
 
-        cfg = get_settings()
+        def _prog(d: dict) -> None:
+            status = d.get("status")
+            if status == "downloading":
+                pct_str = (d.get("_percent_str") or "0%").strip()
+                try:
+                    pct = float(pct_str.rstrip("%")) / 100.0
+                except ValueError:
+                    pct = 0.0
 
-        def _progress(d: dict) -> None:
-            if d.get("status") == "downloading":
-                pct = d.get("_percent_str", "?%").strip()
-                self.master.after(0, lambda: self._set_status(f"Downloading… {pct}"))
+                def _upd_dl(p=pct, s=pct_str):
+                    self._progress.configure(mode="determinate")
+                    self._progress.set(p)
+                    self._set_status(f"Downloading… {s}")
 
+                self.master.after(0, _upd_dl)
+
+            elif status == "finished":
+                def _upd_proc():
+                    self._progress.configure(mode="indeterminate")
+                    self._progress.start()
+                    self._set_status("Processing… (see log for details)")
+
+                self.master.after(0, _upd_proc)
+
+        opts = JobOptions(
+            source_url=url,
+            upload=False,
+            convert_if_needed=True,
+            progress_callback=_prog,
+        )
         try:
-            path = download_video(url, output_dir=cfg.downloads_dir, progress_callback=_progress)
-            self.video_path = path
-            self.master.after(
-                0, lambda: self._set_status("Download complete. Ready to detect / upload.")
-            )
-        except DownloadError as exc:
-            self.master.after(0, lambda: messagebox.showerror("Download error", str(exc)))
-            self.master.after(0, lambda: self._set_status("Download failed."))
-
-    def _on_detect(self) -> None:
-        if not self.video_path:
-            messagebox.showwarning("Warning", "No downloaded video available.")
-            return
-        self._set_status("Running projection detection…")
-        threading.Thread(target=self._detect_thread, args=(self.video_path,), daemon=True).start()
-
-    def _detect_thread(self, video_path: str) -> None:
-        """Normalise codec → extract previews → detect projection → optionally convert."""
-        try:
-            # Codec normalisation
-            self.master.after(0, lambda: self._set_status("Normalising codec…"))
-            from detector.video_io import convert_video_codec
-            norm_path = convert_video_codec(video_path)
-            self.video_path = norm_path
-
-            # Preview frames
-            from core.preview_frames import extract_preview_frames
-            cfg = get_settings()
-            extract_preview_frames(norm_path, num_frames=5, output_dir=os.path.join(cfg.downloads_dir, "previews"))
-
-            # Detection
-            self.master.after(0, lambda: self._set_status("Detecting projection…"))
-            from detector.pipeline import run_detection_pipeline
-            det = run_detection_pipeline(norm_path, num_frames=10)
-            proj = det.get("projection_type", "unknown")
-            conf = float(det.get("confidence", 0.0))
-
-            # Conversion
-            converted: Optional[str] = None
-            if proj not in ("equirectangular", "stereo_equi", "unknown") and conf >= 0.5:
-                self.master.after(0, lambda: self._set_status("Converting to equirectangular…"))
-                from detector.projection_conversion import convert_detected_projection_to_equirectangular
-                converted = convert_detected_projection_to_equirectangular(
-                    norm_path, proj, conf
-                )
-                if converted and converted != norm_path:
-                    self.video_path = converted
-                    norm_path = converted
-
-            msg = (
-                f"Detection complete\n"
-                f"Projection: {proj}\n"
-                f"Confidence: {conf:.1%}"
-            )
-            if converted:
-                msg += f"\nConverted: {os.path.basename(converted)}"
-
-            self.master.after(0, lambda: messagebox.showinfo("Detection", msg))
-            self.master.after(0, lambda: self._set_status("Ready to upload."))
-
+            result = process_video_job(opts)
         except Exception as exc:
-            self.master.after(0, lambda: messagebox.showerror("Detection error", str(exc)))
-            self.master.after(0, lambda: self._set_status("Detection failed."))
+            self.master.after(0, lambda e=str(exc): self._on_process_error(e))
+            return
+        self.master.after(0, lambda r=result: self._on_process_done(r))
+
+    def _on_process_done(self, result) -> None:
+        self._progress.stop()
+        self._progress.configure(mode="determinate")
+        if not result.success:
+            self._progress.set(0)
+            self._set_state(AppState.READY)
+            self._set_status("Processing failed.")
+            tkinter.messagebox.showerror(
+                "Processing failed", result.error or "Unknown error")
+            return
+
+        self._ready_path = (
+            result.converted_video_path
+            or result.normalized_video_path
+            or result.original_video_path
+        )
+        self._progress.set(1.0)
+        proj      = result.projection_type or "unknown"
+        conf      = float(result.confidence or 0)
+        conv_note = " — converted to equirectangular" if result.converted_video_path else ""
+        self._set_status(f"Done — {proj} ({conf:.0%}){conv_note}")
+        self._set_state(AppState.PROCESSED)
+        tkinter.messagebox.showinfo(
+            "Processing complete",
+            f"Projection: {proj}\nConfidence: {conf:.0%}{conv_note}\n\nReady to upload.",
+        )
+
+    def _on_process_error(self, msg: str) -> None:
+        self._progress.stop()
+        self._progress.configure(mode="determinate")
+        self._progress.set(0)
+        self._set_state(AppState.READY if self._selected else AppState.IDLE)
+        self._set_status("Processing failed.")
+        tkinter.messagebox.showerror("Processing error", msg)
+
+    # ── Upload ────────────────────────────────────────────────────────────────
 
     def _on_upload(self) -> None:
-        if not self.video_path:
-            messagebox.showwarning("Warning", "No video available to upload.")
+        if not self._ready_path:
+            tkinter.messagebox.showwarning(
+                "Warning",
+                "No processed video available.\nRun Download & Process first.",
+            )
             return
-        title = self.title_var.get().strip() or os.path.basename(self.video_path)
-        desc = self.desc_text.get("1.0", tk.END).strip() if self.desc_text else ""
-        playlist = self.playlist_var.get().strip() or None
+        title = self._title_entry.get().strip()
+        if not title:
+            tkinter.messagebox.showwarning("Warning", "Enter a title for the upload.")
+            return
+        playlist_id = self._get_playlist_id()
+        self._set_state(AppState.UPLOADING)
         self._set_status("Uploading…")
+        self._progress.configure(mode="indeterminate")
+        self._progress.start()
         threading.Thread(
-            target=self._upload_thread,
-            args=(self.video_path, title, desc, playlist),
+            target=self._bg_upload,
+            args=(self._ready_path, title, playlist_id),
             daemon=True,
         ).start()
 
-    def _upload_thread(
-        self,
-        video_path: str,
-        title: str,
-        description: str,
-        playlist: Optional[str],
-    ) -> None:
+    def _bg_upload(self, path: str, title: str, playlist_id: Optional[str]) -> None:
         from core.uploader import upload_video_asset
         try:
-            upload_result = upload_video_asset(
-                video_path=video_path,
+            result = upload_video_asset(
+                video_path=path,
                 title=title,
-                description=description,
-                playlist_id=playlist,
+                description="",
+                playlist_id=playlist_id,
             )
-            if upload_result.success:
-                self.master.after(
-                    0, lambda: messagebox.showinfo("Upload", "Video uploaded successfully.")
-                )
-                self.master.after(0, lambda: self._set_status("Upload complete."))
-            else:
-                err = upload_result.error or "Unknown error"
-                self.master.after(0, lambda: messagebox.showerror("Upload failed", err))
-                self.master.after(0, lambda: self._set_status("Upload failed."))
-        except MediaCMSError as exc:
-            self.master.after(0, lambda: messagebox.showerror("Upload error", str(exc)))
-            self.master.after(0, lambda: self._set_status("Upload failed."))
+        except (MediaCMSError, Exception) as exc:
+            self.master.after(0, lambda e=str(exc): self._on_upload_error(e))
+            return
+        self.master.after(0, lambda r=result: self._on_upload_done(r))
 
+    def _on_upload_done(self, result) -> None:
+        self._progress.stop()
+        self._progress.configure(mode="determinate")
+        if result.success:
+            self._progress.set(1.0)
+            self._set_status("Upload complete.")
+            self._set_state(AppState.PROCESSED)
+            tkinter.messagebox.showinfo(
+                "Upload complete",
+                f"Video uploaded successfully.\n{result.media_url or ''}",
+            )
+        else:
+            self._progress.set(0)
+            self._set_state(AppState.PROCESSED)
+            self._set_status("Upload failed.")
+            tkinter.messagebox.showerror("Upload failed", result.error or "Unknown error")
+
+    def _on_upload_error(self, msg: str) -> None:
+        self._progress.stop()
+        self._progress.configure(mode="determinate")
+        self._progress.set(0)
+        self._set_state(AppState.PROCESSED)
+        self._set_status("Upload failed.")
+        tkinter.messagebox.showerror("Upload error", msg)
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────
 
 def run_gui() -> None:
-    """Launch the VR360 Manager Tkinter GUI."""
+    """Launch the VR360 Manager GUI."""
     setup_logging(level=logging.INFO)
-    root = tk.Tk()
-    VR360ManagerApp(root)
+    root = ctk.CTk()
+    try:
+        VR360ManagerApp(root)
+    except Exception as exc:
+        logger.exception("Fatal error during GUI initialisation")
+        tkinter.messagebox.showerror("Startup error", str(exc))
+        root.destroy()
+        return
     root.mainloop()
 
 

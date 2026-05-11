@@ -4,7 +4,9 @@
 !.env.example
 
 # ── Runtime data (generated at runtime, never committed) ─────────────────────
+data/*
 data/
+
 # Detector frame cache that may sit next to source files
 detector/frames/
 vr360_manager/pipeline/projection_detection/frames/
@@ -55,3 +57,12 @@ Thumbs.db
 *.avi
 *.mov
 *.ts
+*.jpg
+*.jpeg
+*.png
+*.bmp
+*.gif
+*.zip
+*.tar.gz
+*.tar
+*.rar

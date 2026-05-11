@@ -1,0 +1,57 @@
+# ── Credentials & secrets ────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── Runtime data (generated at runtime, never committed) ─────────────────────
+data/
+# Detector frame cache that may sit next to source files
+detector/frames/
+vr360_manager/pipeline/projection_detection/frames/
+
+# ── Python artefacts ─────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+*.so
+
+# ── Distribution / packaging ─────────────────────────────────────────────────
+dist/
+build/
+*.egg-info/
+*.egg
+MANIFEST
+
+# ── Virtual environments ──────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# ── Test & coverage artefacts ─────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+*.log
+
+# ── IDEs & editors ────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ── Downloaded / generated media (large binary files) ────────────────────────
+# Add specific extensions you don't want to accidentally commit:
+*.mp4
+*.mkv
+*.webm
+*.avi
+*.mov
+*.ts

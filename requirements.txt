@@ -1,0 +1,8 @@
+google-api-python-client
+yt-dlp
+requests
+python-dotenv
+pillow
+opencv-python
+numpy
+moviepy==1.0.3

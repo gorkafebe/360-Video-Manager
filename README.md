@@ -1,45 +1,99 @@
 # 360-Video-Manager
 
-> Download, detect, convert, and upload 360° videos — end-to-end, in one command.
+Download, detect, convert, and upload 360° videos — via GUI or CLI.
 
-360-Video-Manager is a production-ready Python application that combines a robust
-projection-detection engine (no ML models required) with a complete download-process-upload
-workflow for 360° video content.
+360-Video-Manager is a Python application that combines a deterministic
+projection-detection engine (no ML models required) with a complete
+download → process → upload workflow for 360° video content.
+
+---
+
+## Table of Contents
+
+- [Architecture](#architecture)
+- [Prerequisites](#prerequisites)
+- [Setup](#setup)
+- [Configuration](#configuration)
+- [Usage — GUI](#usage--gui)
+- [Usage — CLI](#usage--cli)
+- [Pipeline stages](#pipeline-stages)
+- [Projection types](#projection-types)
+- [Output artifacts](#output-artifacts)
+- [Environment variables](#environment-variables)
+- [Testing](#testing)
+- [Known issues / caveats](#known-issues--caveats)
 
 ---
 
 ## Architecture
 
 ```
-app/              — Entry points
-  main.py         — python -m app.main  (GUI) or  --cli  (CLI mode)
-  cli.py          — argparse CLI, delegates to workflows layer
+app/
+  main.py               Entry point: GUI by default, --cli forwards to cli.py
+  cli.py                argparse CLI; delegates all work to workflows/
   gui/
-    gui_app.py    — Tkinter GUI, no business logic
-config/           — Centralised settings + logging configuration
-core/             — Shared services (YouTube search, download, upload, models, manifests)
-detector/         — Projection detection engine (OpenCV-based, no ML)
+    gui_app.py          CustomTkinter GUI (no pipeline logic)
+    progress_utils.py   Download progress parsing and rate-limiting helpers
+config/
+  settings.py           All configuration loaded from env / .env
+  logging_config.py     Console and file log handlers
+core/
+  downloader.py         yt-dlp wrapper
+  youtube.py            YouTube Data API search and thumbnail helpers
+  uploader.py           MediaCMS HTTP upload client
+  preview_frames.py     JPEG preview-frame extraction (UI thumbnails)
+  models.py             JobResult, DetectorStats, UploadResult dataclasses
+  job_manifest.py       JSON manifest persistence (data/jobs/)
+detector/
+  pipeline.py           Main detection orchestrator
+  video_io.py           OpenCV frame extraction + ffmpeg codec-normalisation fallback
+  line_detection.py     Horizontal / vertical seam detection
+  stereo_detection.py   Histogram-based stereo-equirectangular detection
+  motion_analysis.py    Farneback / DIS optical flow + region scoring
+  projection_logic.py   EAC vs cubemap hypothesis scoring
+  equirectangular_detection.py  Wrap-around boundary-continuity evidence
+  projection_conversion.py      ffmpeg v360 conversion
+  preprocessing.py      Frame pre-processing helpers
+  region_validation.py  Region filtering
+  debug_utils.py        All debug-image and log I/O
 workflows/
-  unified_pipeline.py  — Orchestration: download → normalise → detect → convert → upload
-utils/            — Path helpers and exception hierarchy
-tests/            — Test suite
+  unified_pipeline.py   Orchestration: download → normalise → detect → convert → upload
+utils/
+  exceptions.py         Exception hierarchy
+  paths.py              Path helpers
+tests/
+  test_progress_and_downloader.py
+  test_fallback_and_adaptive.py
 ```
+
+> **Note on virtualenv directories**: `bin/`, `lib/`, `share/`, `include/`,
+> and `pyvenv.cfg` are committed to this repository. They are **not** excluded
+> by `.gitignore` (which only ignores `.venv/`, `venv/`, `env/`, `ENV/`).
+> The project is designed to be used with the committed virtualenv activated
+> from the project root.
 
 ---
 
-## Quick Start
-
-### Prerequisites
+## Prerequisites
 
 - Python 3.9+
-- ffmpeg on `PATH` (required for codec normalisation and equirectangular conversion)
-- **Linux**: `tkinter` is not bundled in the virtualenv — install the system package first:
+- **ffmpeg** on `PATH` — required for codec normalisation and equirectangular
+  conversion. Install via your system package manager:
   ```bash
-  sudo apt install python3-tk      # Debian / Ubuntu / Raspberry Pi OS
+  sudo apt install ffmpeg          # Debian / Ubuntu
+  sudo dnf install ffmpeg          # Fedora / RHEL
+  brew install ffmpeg              # macOS (Homebrew)
+  ```
+- **tkinter** — not bundled in the virtualenv on Linux; install the system
+  package before running the GUI:
+  ```bash
+  sudo apt install python3-tk      # Debian / Ubuntu
   sudo dnf install python3-tkinter # Fedora / RHEL
   ```
 
-### Install
+---
+
+## Setup
 
 ```bash
 git clone <repo>
@@ -47,650 +101,332 @@ cd 360-Video-Manager
 
 # Activate the virtualenv that ships with the repo
 source bin/activate          # Linux / macOS
-# bin\activate.ps1            # Windows PowerShell
+# bin\Activate.ps1            # Windows PowerShell
 
 pip install -r requirements.txt
 ```
 
-> **Important**: all subsequent commands must be run from the project root
-> (`360-Video-Manager/`) with the virtualenv active, otherwise Python cannot
-> locate the `app`, `config`, `core`, and `workflows` packages.
+All subsequent commands must be run from the project root with the virtualenv
+active so that `app`, `config`, `core`, `detector`, `workflows`, and `utils`
+are importable as top-level packages.
 
-### Configure
+---
 
-Copy or create a `.env` file in the project root:
+## Configuration
+
+Create a `.env` file in the project root (or export the variables directly).
+Settings are loaded by `config/settings.py` at startup via `python-dotenv`
+(with a built-in fallback parser if `python-dotenv` is unavailable).
 
 ```dotenv
-# YouTube Data API v3
+# ── Required for YouTube search ──────────────────────────────────────────────
 YOUTUBE_API_KEY=your_api_key_here
 
-# MediaCMS instance
+# ── Required for MediaCMS upload ─────────────────────────────────────────────
 CMS_API_URL=https://your-cms.example.com/api/v1/media
 CMS_USER=admin
 CMS_PASSWORD=secret
 CMS_TOKEN=csrf_token_here
 
-# Optional: override default data directories
+# ── Optional directory overrides ─────────────────────────────────────────────
 DOWNLOADS_DIR=data/downloads
+VPD_FRAMES_OUTPUT_DIR=data/frames
+VPD_DEBUG_OUTPUT_DIR=data/frames
 ```
+
+All variables are optional for detection-only workflows; YouTube search and
+MediaCMS upload will fail gracefully with a clear error when their credentials
+are missing.
 
 ---
 
-## Usage
-
-### GUI (default)
+## Usage — GUI
 
 ```bash
 python -m app.main
 ```
 
-### CLI
+The GUI launches a CustomTkinter window. Workflow:
 
-```bash
-# Download, detect, convert and upload from a YouTube URL
-python -m app.main --cli --url "https://youtu.be/XXXXXXXXXXX" --upload
+1. **Search** — type a YouTube URL or search query and press Enter or click
+   Search. Results appear as scrollable cards.
+2. **Select** — click a result card to populate the detail panel with the
+   title, channel, and URL.
+3. **Download & Process** — starts the unified pipeline in a background thread:
+   download → codec normalise → detect projection → convert if needed.
+   Progress and status are shown in the always-visible bottom bar.
+4. **Upload to CMS** — becomes available after a successful Download & Process.
+   Optionally assign a title, choose an existing MediaCMS playlist, or create
+   a new one before uploading.
+5. **Log panel** — toggled with the "Show log" button; displays structured
+   pipeline log output in real time.
 
-# Use a search query instead of a direct URL
-python -m app.main --cli --url "360 drone ocean sunset" --upload --title "Ocean 360"
-
-# Process a local file (skip download)
-python -m app.main --cli --local /path/to/video.mp4 --no-upload
-
-# Full options
-python -m app.main --cli --help
-```
-
-Key CLI flags:
-
-| Flag | Default | Description |
-|---|---|---|
-| `--url` | — | YouTube URL or search query |
-| `--local` | — | Path to a local video (skips download) |
-| `--upload` | false | Upload to MediaCMS |
-| `--no-convert` | false | Skip equirectangular conversion |
-| `--confidence-threshold` | 0.5 | Minimum detection confidence for conversion |
-| `--detection-frames` | 10 | Frames passed to the detector |
-| `--preview-frames` | 5 | Preview frames for the UI |
-| `--playlist` | — | Existing MediaCMS playlist ID/name |
-| `--new-playlist` | — | Create a new playlist and add the video to it |
-| `--no-manifest` | false | Do not save a JSON job manifest |
+The Download & Process and Upload buttons are always visible regardless of
+window size (they are anchored to a fixed bottom frame). The results, detail
+panel, and upload options are in a scrollable content area above.
 
 ---
 
-## Workflow Stages
+## Usage — CLI
+
+```bash
+# Download from a YouTube URL, detect, convert, and upload
+python -m app.main --cli --url "https://youtu.be/XXXXXXXXXXX" --upload
+
+# Use a search query instead of a direct URL
+python -m app.main --cli --url "360 aerial drone" --upload --title "Aerial 360"
+
+# Process a local file (skip download step)
+python -m app.main --cli --local /path/to/video.mp4
+
+# Process a local file and upload
+python -m app.main --cli --local /path/to/video.mp4 --upload
+
+# Skip conversion even if the projection warrants it
+python -m app.main --cli --url "https://youtu.be/..." --no-convert
+
+# Show all options
+python -m app.main --cli --help
+```
+
+### CLI flags
+
+| Flag | Default | Description |
+|---|---|---|
+| `--url URL_OR_QUERY` | — | YouTube URL or free-text search query. Required unless `--local` is used. |
+| `--local VIDEO_PATH` | — | Path to a local video file; skips the download step. |
+| `--output-dir DIR` | `data/downloads` | Directory for downloaded and converted files. |
+| `--title TEXT` | filename | Upload title override. |
+| `--description TEXT` | `""` | Upload description. |
+| `--playlist NAME_OR_ID` | — | Existing MediaCMS playlist name or ID. |
+| `--new-playlist NAME` | — | Create a new playlist with this name and add the video. |
+| `--upload` | off | Upload the final asset to MediaCMS. |
+| `--no-convert` | off | Skip equirectangular conversion. |
+| `--confidence-threshold FLOAT` | `0.5` | Minimum detection confidence to trigger conversion. |
+| `--detection-frames N` | `10` | Number of frames passed to the detector. |
+| `--preview-frames N` | `5` | Number of UI preview frames to extract. |
+| `--no-manifest` | off | Do not save a JSON job manifest. |
+| `--verbose` / `-v` | off | Enable DEBUG-level logging. |
+
+### CLI output
+
+On success:
+
+```
+[OK]  job_id=20260512_120000_123456
+      projection : eac
+      confidence : 91.0%
+      converted  : data/downloads/video_equirectangular.mp4
+      manifest   : data/jobs/job_20260512_120000_123456.json
+```
+
+On failure the error message is printed to stderr and the exit code is 1.
+
+---
+
+## Pipeline stages
 
 ```
 source URL / local file
     │
-    ▼
-1.  YouTube search / URL resolution  (optional)
-2.  yt-dlp download                  → data/downloads/
-3.  Codec normalisation (ffmpeg)     — single pass, shared by all subsequent steps
-4.  Preview frame extraction         → data/downloads/previews/   (UI thumbnails)
-5.  Projection detection             (OpenCV analysis engine)
-6.  Equirectangular conversion       (ffmpeg v360 filter)   — only when warranted
-7.  MediaCMS upload                  (optional)
-8.  Job manifest saved               → data/jobs/job_<timestamp>.json
+    ├─ Stage 1: YouTube search / URL resolution   (skipped when --local is used)
+    │
+    ├─ Stage 2: yt-dlp download                   → data/downloads/
+    │           (skipped when --local is used)
+    │
+    ├─ Stage 3: Codec normalisation               single ffmpeg pass
+    │           (video_io.convert_video_codec)     skipped when OpenCV can decode directly
+    │
+    ├─ Stage 4: Preview frame extraction          → data/downloads/previews/
+    │           (core/preview_frames.py)           JPEG, evenly-spaced, skips head/tail
+    │
+    ├─ Stage 5: Projection detection              (detector/pipeline.py)
+    │           Line detection → stereo check → optical-flow scoring
+    │           Returns projection_type + confidence
+    │
+    ├─ Stage 6: Equirectangular conversion        (detector/projection_conversion.py)
+    │           Only when convert_if_needed=True and confidence ≥ threshold
+    │           unknown → falls back to eac (see fallback note below)
+    │
+    ├─ Stage 7: MediaCMS upload                   (optional; core/uploader.py)
+    │
+    └─ Stage 8: JSON job manifest                 → data/jobs/job_<id>.json
+                (optional; core/job_manifest.py)
 ```
 
-### Preview frames vs. detector frames
+### Projection detection
 
-| | Preview frames | Detector analysis frames |
-|---|---|---|
-| Purpose | UI thumbnails / display | Projection classification |
-| Module | `core/preview_frames.py` | `detector/video_io.py` |
-| Output dir | `data/downloads/previews/` | `data/frames/` |
-| Format | JPEG | PNG |
+The detector (`detector/pipeline.py`) runs without ML models:
+
+1. Black-frame filtering.
+2. Horizontal / vertical seam detection — a central structural line is the
+   primary cue for non-equirectangular content.
+3. Stereo histogram matching — identifies stereo-equirectangular layouts.
+4. Dense optical-flow analysis — Farneback or DIS; per-region directional
+   aggregation; EAC vs cubemap hypothesis scoring.
+5. Equirectangular wrap-around boundary-continuity evidence.
+6. Reliability gate — if confidence is too low or too few valid frames were
+   analysed, the detection result is `unknown`.
+
+### Conversion decision
+
+| Detected projection | Conversion action |
+|---|---|
+| `equirectangular` | Skipped — already target format |
+| `stereo_equi` | Skipped — geometry is already equirectangular |
+| `eac` | Converted via `ffmpeg v360=eac:equirect` |
+| `cubic` | Converted via `ffmpeg v360=c3x2:equirect` |
+| `unknown` | **Falls back to `eac`** and conversion is attempted |
+
+The `unknown → eac` fallback is applied in `workflows/unified_pipeline.py`
+`_stage_convert_to_equirectangular` with a `WARNING` log entry, so the
+fallback is always traceable. The `JobResult.projection_type` field retains
+the original detected value (`unknown`); only the conversion branch uses `eac`.
+
+**Audio handling during conversion**
+
+360° content commonly carries ambisonic audio with non-standard channel
+layouts. The conversion layer:
+
+1. Attempts conversion with audio re-encoded to AAC (`-c:a aac -b:a 192k`).
+2. On an ambisonic / unsupported-layout ffmpeg error, retries automatically
+   with audio dropped (`-an`). The resulting file has no audio track.
+3. A conversion failure never fails the overall job — detection results are
+   always returned.
 
 ---
 
-## Projection Types
+## Projection types
 
 | Value | Description |
 |---|---|
-| `equirectangular` | Standard 2:1 360° format |
-| `stereo_equi` | Side-by-side or top-bottom stereo equirectangular |
-| `eac` | Equi-Angular Cubemap (YouTube VR format) |
-| `cubemap` / `cubic` | 3×2 cubic layout |
-| `unknown` | Could not determine with sufficient confidence |
+| `equirectangular` | Standard 2:1 equidistant cylindrical format |
+| `stereo_equi` | Stereo pair in equirectangular layout (side-by-side or top-bottom) |
+| `eac` | Equi-Angular Cubemap — the YouTube 360° VR standard |
+| `cubic` | Conventional cubemap in a 3×2 face layout |
+| `unknown` | Insufficient data or confidence below threshold |
 
 ---
 
-## Environment Variables Reference
+## Output artifacts
+
+| Artifact | Default location | Notes |
+|---|---|---|
+| Downloaded video | `data/downloads/` | Raw yt-dlp output |
+| Codec-normalised video | `data/downloads/` | Only when OpenCV could not decode the original; filename gets a `_compat_` infix |
+| Converted video | `data/downloads/` | `<stem>_equirectangular.mp4`; only produced when conversion ran |
+| Preview frames | `data/downloads/previews/` | JPEG thumbnails for the GUI |
+| Detector analysis frames | `data/frames/<video_stem>-<timestamp>/` | Per-run subdirectories: `main_frames/`, `secondary_frames/`, `motion_vectors/`, `line_detection/`, `logs/` |
+| Job manifest | `data/jobs/job_<id>.json` | JSON record with all result fields; `schema_version: "1.0"` |
+
+All `data/` subdirectories are created automatically by
+`Settings.ensure_runtime_dirs()` on startup.
+
+> `data/` is excluded from version control by `.gitignore`.
+
+---
+
+## Environment variables
+
+All variables are read from the environment or a `.env` file at the project
+root. Defaults shown are the values used when a variable is not set.
 
 | Variable | Default | Description |
 |---|---|---|
 | `YOUTUBE_API_KEY` | — | YouTube Data API v3 key |
-| `CMS_API_URL` | — | MediaCMS `/api/v1/media` endpoint |
-| `CMS_USER` / `USER` | — | MediaCMS username (Basic Auth) |
-| `CMS_PASSWORD` / `PASSWORD` | — | MediaCMS password |
-| `CMS_TOKEN` / `TOKEN` | — | MediaCMS CSRF token |
-| `DOWNLOADS_DIR` | `data/downloads` | Download output directory |
-| `VPD_FRAMES_OUTPUT_DIR` | `data/frames` | Detector frame cache |
-| `VPD_DEBUG_OUTPUT_DIR` | `data/debug` | Debug visualisation output |
-| `VPD_MIN_FRAMES_ANALYZED` | `5` | Minimum frames for a valid result |
-| `VPD_MAX_DISCARD_RATIO` | `0.8` | Maximum acceptable frame discard ratio |
-| `VPD_MIN_LAYOUT_SCORE_MARGIN` | `0.1` | Confidence margin between top layouts |
-| `VPD_LINE_CENTER_BAND_RATIO` | `0.3` | Line detection centre-band width |
-| `VPD_LINE_CENTER_MAX_DISTANCE_RATIO` | `0.05` | Line centre-distance tolerance |
-| `VPD_LINE_MAX_SLOPE` | `0.1` | Maximum accepted line slope |
-| `VPD_LINE_MIN_COVERAGE_RATIO` | `0.7` | Minimum line coverage across frame |
-| `VPD_STEREO_HIST_SIMILARITY_THRESHOLD` | `0.85` | Histogram similarity for stereo detection |
-| `VPD_SAVE_STEREO_HALVES` | `false` | Save left/right half debug images |
-| `VPD_FLOW_ALGORITHM` | `farneback` | Optical flow algorithm (`farneback` or `dis`) |
+| `CMS_API_URL` | — | MediaCMS API endpoint (e.g. `https://cms.example.com/api/v1/media`) |
+| `CMS_USER` | `$USER` | MediaCMS username for HTTP Basic Auth |
+| `CMS_PASSWORD` | — | MediaCMS password |
+| `CMS_TOKEN` | — | MediaCMS CSRF token |
+| `VPD_PROJECT_ROOT` | auto-detected | Override the project root directory |
+| `DOWNLOADS_DIR` | `data/downloads` | Download and conversion output directory |
+| `VPD_FRAMES_OUTPUT_DIR` | `data/frames` | Detector analysis frame output |
+| `VPD_DEBUG_OUTPUT_DIR` | same as `VPD_FRAMES_OUTPUT_DIR` | Debug visualisation output |
+| `VPD_MIN_FRAMES_ANALYZED` | `4` | Minimum analysed frames required for a valid result |
+| `VPD_MAX_DISCARD_RATIO` | `0.65` | Maximum acceptable frame-discard ratio |
+| `VPD_MIN_LAYOUT_SCORE_MARGIN` | `0.10` | Minimum score margin between layout hypotheses |
+| `VPD_LINE_CENTER_BAND_RATIO` | `0.08` | Band width around frame centre for seam search |
+| `VPD_LINE_CENTER_MAX_DISTANCE_RATIO` | `0.02` | Max relative distance of seam from centre |
+| `VPD_LINE_MAX_SLOPE` | `0.05` | Maximum accepted seam slope |
+| `VPD_LINE_MIN_COVERAGE_RATIO` | `0.20` | Minimum seam coverage fraction across frame width |
+| `VPD_STEREO_HIST_THRESHOLD` | `0.92` | Histogram correlation threshold for stereo detection |
+| `VPD_SAVE_STEREO_HALVES` | `true` | Save left/right half-frame debug images |
+| `VPD_FLOW_ALGORITHM` | `farneback` | Optical-flow algorithm: `farneback` or `dis` |
 
 ---
 
-## Output Artifacts
-
-| Artifact | Location | Description |
-|---|---|---|
-| Downloaded video | `data/downloads/` | Original download from yt-dlp |
-| Normalised video | `data/downloads/` | Codec-normalised copy (if different) |
-| Converted video | `data/downloads/` | Equirectangular-converted output |
-| Preview frames | `data/downloads/previews/<stem>/` | JPEG thumbnails for the UI |
-| Debug frames | `data/debug/<run>/` | Optical-flow and line visualisations |
-| Job manifest | `data/jobs/job_<timestamp>.json` | Full structured job record |
-
----
-
-## Development
+## Testing
 
 ```bash
-# Run tests
-python -m pytest tests/
-
-# Run the smoke-test suite
-python test_fixes.py
-
-# Run a single detection (no upload)
-python -m app.main --cli --local /path/to/video.mp4 --no-upload --verbose
+# Run the full test suite (from project root, virtualenv active)
+./bin/python -m pytest tests/ -v
 ```
+
+Current test files:
+
+| File | Coverage |
+|---|---|
+| `tests/test_progress_and_downloader.py` | Download-progress parsing, rate-limiting delay, yt-dlp output-path resolution |
+| `tests/test_fallback_and_adaptive.py` | `unknown → eac` conversion fallback; `equirectangular`/`stereo_equi` skip behaviour; low-confidence skip; adaptive wraplength formula |
 
 ---
 
-## Original VideoProjectionDetector
+## Known issues / caveats
 
-## Table of Contents
+### `confidence=` parameter mismatch (runtime `TypeError` on conversion)
 
-- [Background](#background)
-- [Install](#install)
-- [Usage](#usage)
-- [Pipeline](#pipeline)
-- [Modules](#modules)
-- [Projection Types](#projection-types)
-- [Conversion Behavior](#conversion-behavior)
-- [API](#api)
-- [Configuration](#configuration)
-- [Development](#development)
-- [Tests](#tests)
-- [Known Limitations](#known-limitations)
-- [Contributing](#contributing)
-- [License](#license)
-
-## Background
-
-360° video platforms and players encode content in several spatial layouts. Automatically identifying the layout is a prerequisite for correct playback, transcoding, and quality analysis pipelines.
-
-VideoProjectionDetector works without external ML models. It uses deterministic computer-vision steps:
-
-1. A central horizontal (or vertical) structural line that appears in non-equirectangular 360° frames is detected and used as a primary cue.
-2. Stereo histogram matching is used to identify stereo-equirectangular pairs.
-3. Dense optical-flow analysis and layout hypothesis scoring (EAC vs. cubemap) resolves the remaining cases.
-4. A reliability-aware retry strategy re-runs the analysis with different frame spacing when initial confidence is insufficient.
-
-## Install
-
-**System requirements**
-
-- Python ≥ 3.9
-- OpenCV with contrib (`opencv-contrib-python`)
-- ffmpeg on `PATH` — required for video compatibility fallback and for projection conversion
-
-**Python environment**
-
-```sh
-python -m venv VideoProjectionDetector
-source VideoProjectionDetector/bin/activate
-pip install opencv-contrib-python numpy
-```
-
-**ffmpeg**
-
-Install ffmpeg through your system package manager:
-
-```sh
-# Debian / Ubuntu
-sudo apt install ffmpeg
-
-# macOS (Homebrew)
-brew install ffmpeg
-```
-
-## Usage
-
-### Python API
+`workflows/unified_pipeline.py` calls `convert_detected_projection_to_equirectangular`
+with a `confidence=` keyword argument:
 
 ```python
-from pipeline import process_downloaded_video
-
-result = process_downloaded_video("/path/to/video.mp4")
-
-print(result["projection_type"])   # e.g. "equirectangular"
-print(result["confidence"])        # e.g. 0.87
-print(result["motion_reliable"])   # True / False
-
-# Conversion result (when applicable)
-conv = result["conversion"]
-print(conv["skipped"])             # True when no conversion is needed
-print(conv["output_path"])         # Path to converted file, or None
+converted = convert_detected_projection_to_equirectangular(
+    video_path=video_path,
+    projection_type=projection_type,
+    confidence=confidence,      # ← not in function signature
+    output_dir=output_dir,
+)
 ```
 
-### CLI
-
-```sh
-python detector.py /path/to/video.mp4
-```
-
-The CLI prints the detected projection type, confidence, and the paths of any debug frames saved to disk.
-
-### Output directory
-
-Each run creates a timestamped directory under `frames/` containing:
-
-| Subfolder | Contents |
-|---|---|
-| `main_frames/` | Sampled primary frames |
-| `secondary_frames/` | Temporal neighborhoods per main frame |
-| `motion_vectors/` | Optical-flow overlays and per-pair decisions |
-| `line_detection/` | Structural line detection outcomes per frame |
-
-## Pipeline
-
-`pipeline.py` orchestrates the following sequence:
-
-1. **Video compatibility fallback** — attempt direct OpenCV decoding; if it fails, transcode to H.264/yuv420p with ffmpeg and re-open.
-2. **Frame extraction** — extract equidistant *main frames* for structural detection and denser *secondary frames* (temporal neighborhoods) for motion analysis.
-3. **Black-frame filtering** — discard frames that are fully or near-fully black.
-4. **Horizontal and vertical line detection** — detect the central seam that characterises non-equirectangular frames. Vertical detection is used as a fallback for left-right stereo candidate identification.
-5. **Equirectangular wrap-around evidence** — compute positive boundary-continuity evidence per frame as a supplement to the seam-based classifier.
-6. **Stereo histogram matching** — compare top/bottom (or left/right) halves to detect stereo-equirectangular layouts.
-7. **Motion analysis** — compute dense Farneback optical flow over secondary frame pairs; split each frame into a 2×3 region grid; derive magnitude-weighted directional vectors per region.
-8. **Layout scoring** — score EAC and cubemap hypotheses using angular consistency rules; aggregate pairwise decisions.
-9. **Reliability gate and retry** — if the result is unreliable (too few valid pairs, low confidence margin), retry with wider temporal spacing (up to two additional attempts).
-10. **Projection conversion** — if the detected type is EAC or cubemap, optionally convert to monoscopic equirectangular via ffmpeg v360.
-
-## Modules
-
-| Module | Responsibility |
-|---|---|
-| `pipeline.py` | Main orchestrator: end-to-end flow, retry logic, final classification |
-| `detector.py` | Backward-compatible entrypoint; legacy Spanish function names; CLI |
-| `video_io.py` | Video decoding, codec fallback, main-frame and secondary-frame extraction |
-| `preprocessing.py` | Grayscale conversion and Gaussian blur for line and motion branches |
-| `line_detection.py` | Horizontal and vertical seam detection (Canny + HoughLinesP + FFT verification) |
-| `stereo_detection.py` | Histogram correlation and Bhattacharyya-based stereo matching |
-| `motion_analysis.py` | Farneback optical flow, 2×3 region splitting, directional aggregation |
-| `region_validation.py` | Region filtering by concentration and active-pixel ratio |
-| `projection_logic.py` | EAC / cubemap hypothesis scoring and pairwise decision rules |
-| `equirectangular_detection.py` | Positive equirectangular evidence via wrap-around boundary continuity and 2:1 aspect-ratio prior |
-| `projection_conversion.py` | ffmpeg-based conversion of detected EAC / cubemap to equirectangular |
-| `debug_utils.py` | All file I/O for debug artifacts; logging helpers; run-directory management |
-
-## Projection Types
-
-| Type | Description |
-|---|---|
-| `equirectangular` | Standard monoscopic 2:1 equidistant cylindrical projection |
-| `stereo_equi` | Stereo equirectangular (two stacked or side-by-side equirectangular images) |
-| `eac` | Equi-angular cubemap (YouTube 360 standard) |
-| `cubic` | Conventional cubemap; 3×2 layout assumed (adjust `_V360_INPUT_FORMAT` in `projection_conversion.py` for other variants) |
-| `unknown` | Insufficient data or low-reliability result |
-
-## Conversion Behavior
-
-After detection, `process_downloaded_video()` automatically calls `convert_detected_projection_to_equirectangular()`. The output of the conversion is included in the returned result dict under the `"conversion"` key.
-
-| Detected type | Conversion action | Reason |
-|---|---|---|
-| `equirectangular` | Skipped | Already target format |
-| `stereo_equi` | Skipped | Geometry is already equirectangular; stereo-to-mono flattening is out of scope |
-| `eac` | Converted | `ffmpeg v360=eac:equirect` |
-| `cubic` | Converted | `ffmpeg v360=c3x2:equirect` |
-| `unknown` | Skipped | Cannot safely convert without a known layout |
-
-Converted files are written to the run directory (or next to the source video when no run directory exists) with the suffix `_equirectangular.mp4`.
-
-**Audio handling during conversion**
-
-360° videos commonly carry first-order ambisonic audio with non-standard channel layouts that standard AAC encoders cannot process. The conversion layer:
-
-1. Attempts conversion with audio re-encoded to AAC (`-c:a aac -b:a 192k`).
-2. If ffmpeg fails with an ambisonic/unsupported-channel-layout error, retries automatically with audio dropped (`-an`).
-3. A failure on the retry still returns the full detection result; only the conversion sub-result reflects the failure.
-
-This means a conversion failure never turns a successful detection into a failed overall process.
-
-## API
-
-### `process_downloaded_video(video_path, output_dir=None)`
-
-Main public entry point. Runs the full detection and conversion pipeline.
-
-**Returns** a dict with at minimum:
+The actual signature in `detector/projection_conversion.py` is:
 
 ```python
-{
-    "success": bool,
-    "projection_type": str,       # "equirectangular" | "stereo_equi" | "eac" | "cubic" | "unknown"
-    "confidence": float,          # [0, 1]
-    "frames_analyzed": int,
-    "frames_with_line": int,
-    "motion_reliable": bool,
-    "motion_reliability_reason": str,
-    "motion_pairs_total": int,
-    "motion_pairs_valid": int,
-    "motion_confidence": float,
-    "stats": dict,
-    "conversion": {               # always present
-        "attempted": bool,
-        "success": bool,
-        "skipped": bool,
-        "reason": str,
-        "output_path": str | None,
-        "ffmpeg_command": list | None,
-        "stderr": str,
-        "error": str | None,
-    },
-    "converted_to_equirectangular": bool,
-    "converted_video_path": str | None,
-}
+def convert_detected_projection_to_equirectangular(
+    video_path: str,
+    projection_type: str,
+    output_dir: Optional[str] = None,
+    name_source_path: Optional[str] = None,
+) -> Dict[str, Any]:
 ```
 
-### `run_detection_pipeline(video_path, ...)`
+Passing `confidence=` raises a `TypeError` at runtime whenever conversion is
+attempted (i.e. for `eac`, `cubic`, or `unknown` projections above the
+confidence threshold). The conversion stage will fail for those cases until
+this mismatch is fixed.
 
-Lower-level function that runs a single detection pass with explicit frame data. Useful when you supply pre-extracted frames or need fine control over thresholds. See `pipeline.py` for the full parameter list.
+### Return-type mismatch in `_stage_convert_to_equirectangular`
 
-### `convert_detected_projection_to_equirectangular(video_path, projection_type, output_dir=None)`
+`convert_detected_projection_to_equirectangular` returns a `Dict[str, Any]`,
+but `_stage_convert_to_equirectangular` in `unified_pipeline.py` treats the
+return value as a file-path string (comparing it with `!= video_path` and
+storing it in `result.converted_video_path`). This is a secondary bug that
+would surface once the `confidence=` TypeError is resolved.
 
-Stand-alone conversion function. Returns the conversion result dict described above. Safe to call independently of the detection pipeline.
+### Virtualenv committed to the repository
 
-## Configuration
+The virtualenv directories (`bin/`, `lib/`, `share/`, `include/`, `pyvenv.cfg`)
+are tracked by git. They are not listed in `.gitignore` (which only excludes
+`.venv/`, `venv/`, `env/`, `ENV/`). This is the intended layout for this
+repository; activate using `source bin/activate` from the project root.
 
-All thresholds are read from environment variables at startup (or from a `.env` file in the project root). Key variables:
+### Cubemap layout assumption
 
-| Variable | Default | Description |
-|---|---|---|
-| `VPD_FRAMES_OUTPUT_DIR` | `./frames` | Root directory for debug output |
-| `VPD_NUM_FRAMES` | `10` | Main frames per detection attempt |
-| `VPD_LINE_CENTER_MAX_DISTANCE_RATIO` | `0.10` | Vertical tolerance for seam acceptance |
-| `VPD_STEREO_HIST_THRESHOLD` | `0.85` | Minimum histogram correlation for stereo match |
-| `VPD_MIN_MOTION_CONFIDENCE` | `0.20` | Minimum confidence for motion classification |
-| `VPD_FLOW_ALGORITHM` | `farneback` | Optical-flow algorithm |
+Conversion of `cubic` projection assumes the 3×2 face layout (`ffmpeg v360=c3x2:equirect`).
+Videos using other cubemap arrangements (6×1 strip, cross layout, etc.) will
+produce incorrect output. Update `_V360_INPUT_FORMAT["cubic"]` in
+`detector/projection_conversion.py` if needed.
 
-Run `python -c "from pipeline import load_config, CONFIG; print(CONFIG)"` to inspect all active values.
+### Static-scene detection reliability
 
-## Development
-
-```sh
-git clone https://github.com/gorkafebe/VideoProjectionDetector.git
-cd VideoProjectionDetector
-python -m venv VideoProjectionDetector
-source VideoProjectionDetector/bin/activate
-pip install opencv-contrib-python numpy
-```
-
-All processing modules are side-effect free — they return data structures and do not write files directly. All debug I/O is centralised in `debug_utils.py`.
-
-## Tests
-
-```sh
-source VideoProjectionDetector/bin/activate
-python -m unittest tests/test_projection_conversion.py -v
-```
-
-The test suite covers:
-
-- Correct ffmpeg v360 filter generation for `eac` (`v360=eac:equirect`) and `cubic` (`v360=c3x2:equirect`)
-- Audio-present vs audio-dropped command variants
-- Audio-failure detection and automatic retry without audio
-- Skip behavior for `equirectangular` and `stereo_equi`
-- Skip behavior for `unknown` projection
-- Output path construction
-
-## Known Limitations
-
-- **ffmpeg dependency** — video compatibility fallback and projection conversion both require ffmpeg on `PATH`. Detection-only mode works without it, but the compatibility fallback may fail on certain codecs.
-- **Cubemap layout assumption** — conversion assumes a 3×2 cubemap layout (`c3x2`). Sources using a different cube arrangement (e.g. 6×1 strip, cross layout) will require updating `_V360_INPUT_FORMAT["cubic"]` in `projection_conversion.py`.
-- **No stereo-to-mono flattening** — `stereo_equi` videos are skipped during conversion because the geometry is already equirectangular. Flattening two stacked equirectangular images into a single mono frame is out of scope in the current implementation.
-- **Static scenes** — the motion-analysis branch requires sufficient camera or scene motion. Near-static content may not yield reliable directional constraints for EAC vs. cubemap scoring.
-- **Ambisonic audio** — 360° content commonly carries first-order ambisonic audio. The conversion layer handles this by retrying without audio, but the resulting output file will contain no audio track if the retry is needed.
-- **Single-file assumption** — the pipeline processes one video file per call. Batch processing must be implemented at the caller level.
-
-## Contributing
-
-Open an issue or submit a pull request. Please keep changes focused and include or update tests when modifying conversion or detection logic.
-
-## License
-
-See [LICENSE](LICENSE).
-
-
-## New Modular Configuration
-
-The project has been refactored into a modular pipeline. Behavior, thresholds, output naming, and retry strategy are preserved.
-
-### Core Modules
-
-- `video_io.py`
-   - Video compatibility fallback (OpenCV -> ffmpeg transcode)
-   - Main-frame extraction
-   - Secondary-frame extraction
-
-- `preprocessing.py`
-   - Frame preparation for optical flow (grayscale + Gaussian blur)
-   - Frame preparation for line detection (grayscale + light Gaussian blur)
-
-- `line_detection.py`
-   - Horizontal line detection logic
-   - Line debug drawing primitives (no file I/O)
-
-- `motion_analysis.py`
-   - Farneback optical flow computation
-   - 2x3 region splitting
-   - Per-region motion aggregation
-
-- `region_validation.py`
-   - Region filtering based on concentration and active-ratio constraints
-
-- `projection_logic.py`
-   - EAC/Cubemap hypothesis scoring
-   - Angular consistency evaluation
-   - Pair-level decision rule
-
-- `stereo_detection.py`
-   - Histogram build/compare
-   - Stereo-equirectangular decision logic
-
-- `debug_utils.py`
-   - Logging helpers
-   - Debug image rendering/saving
-   - Run output directory creation and stats formatting
-
-- `pipeline.py`
-   - Main orchestrator connecting all modules
-   - End-to-end decision flow and retry loop
-
-- `detector.py`
-   - Backward-compatible entrypoint and wrapper
-   - Preserves CLI and legacy public function names while delegating to `pipeline.py`
-
-## Overview
-
-The detector distinguishes between:
-
-- Non-equirectangular content (detected through a central horizontal structural cue)
-- EAC vs Cubemap layout (detected through optical-flow geometry)
-
-The system does not rely on external ML models. It uses deterministic computer vision steps, layout hypothesis scoring, and reliability-aware retries.
-
-## High-Level Flow (Orchestrator)
-
-`pipeline.py` executes the following sequence:
-
-1. Extract main frames.
-2. Detect horizontal line on each non-black main frame.
-3. If no line is detected in analyzed frames -> classify as `equirectangular`.
-4. If line exists -> run stereo histogram check.
-5. If stereo matches threshold -> classify as `stereo_equi`.
-6. Otherwise run motion analysis on secondary frame sequences.
-7. Score EAC vs Cubemap hypotheses and aggregate pair outcomes.
-8. Apply reliability gates and deterministic retry strategy if needed.
-
-## Processing Pipeline
-
-### 1) Video Compatibility Handling
-
-1. Attempt direct decoding with OpenCV (`cv2.VideoCapture`).
-2. If decoding fails, transcode with `ffmpeg` to a compatible H.264/`yuv420p` copy.
-3. Re-open and validate the converted file with OpenCV before processing.
-
-### 2) Frame Extraction
-
-Two frame layers are used:
-
-- Main frames: equidistant samples across the video (with temporal padding to avoid black boundaries).
-- Secondary frames: temporal neighborhoods around each main-frame position (`P-Δ`, `P`, `P+Δ`) used only for motion analysis.
-
-This separation keeps structural detection and motion scoring independent.
-
-### 3) Horizontal Line Detection (Structural Cue)
-
-For each valid main frame:
-
-1. Convert to grayscale with a light Gaussian blur (kernel 3x3, sigma=0).
-2. Detect edges (Canny).
-3. Detect line segments (HoughLinesP).
-4. Accept lines that are:
-   - Nearly horizontal (low slope)
-   - Centered around the vertical midpoint band
-
-If enough main frames contain this cue, the video is treated as non-equirectangular and forwarded to motion-based layout classification.
-
-### 4) Motion Analysis (Dense Optical Flow)
-
-For each consecutive pair in secondary sequences:
-
-1. Apply Gaussian blur (configurable kernel/sigma) only in the motion branch.
-2. Compute dense Farneback optical flow.
-3. Convert flow to magnitude/angle.
-4. Split frame into a fixed 2x3 grid.
-5. For each region, compute representative motion direction via magnitude-weighted circular mean.
-6. Reject regions with weak motion or low directional concentration (high variance/bimodal behavior).
-
-### 5) Projection Classification (EAC vs Cubemap)
-
-For each frame pair, evaluate two layout hypotheses and select the better-scoring one.
-Across all valid pairs, aggregate decisions; if EAC ratio is above threshold, final class is `eac`, otherwise `cubic`.
-
-### 6) Reliability Check and Adaptive Retry
-
-After pairwise motion aggregation, reliability is evaluated using:
-
-- Minimum number of valid motion pairs
-- Motion confidence derived from class ratio separation
-
-If reliability is low, the pipeline retries with wider temporal spacing and reduced frame count (deterministic retry plan), re-running extraction and motion analysis from scratch.
-
-## 2x3 Grid and Face Mapping
-
-Frame is partitioned as:
-
-- Top row: `(0,0) (0,1) (0,2)`
-- Bottom row: `(1,0) (1,1) (1,2)`
-
-## EAC Mapping
-
-- Top row: `LEFT, FRONT, RIGHT`
-- Bottom row: `BOTTOM, BACK, TOP`
-
-## Cubemap Mapping
-
-- Top row: `LEFT, RIGHT, TOP`
-- Bottom row: `BOTTOM, FRONT, BACK`
-
-## Motion-Based Layout Scoring
-
-Each hypothesis is scored from orientation-corrected region angles using physically grounded relative relationships:
-
-- `BACK` vs `FRONT` is evaluated as opposite direction (`|diff| ~ 180°`, magnitude-based).
-- EAC emphasizes left/right symmetry around `FRONT` when all three are present.
-- Cubemap emphasizes side-face perpendicularity (`|LEFT-FRONT|` and `|RIGHT-FRONT|` near `90°`) when `FRONT` is present.
-- If `FRONT` is unavailable, fallback pairwise consistency checks are used instead of hard-failing the pair.
-
-Angular comparisons are normalized on the circular domain, with configurable tolerance bands.
-
-The layout with higher consistency score wins for the pair.
-
-## Orientation Correction (Why It Matters)
-
-Raw region angles are not directly comparable across all faces in EAC.
-
-- In Cubemap, regions share a common orientation, so no per-region correction is required.
-- In EAC, bottom-row faces have different local "up" directions and must be rotated to a common reference frame before angle comparison.
-
-Current correction model for EAC bottom row:
-
-- `BOTTOM`: `-90°`
-- `BACK`: `+90°`
-- `TOP`: `+90°`
-
-Without this normalization, true geometric relationships can appear inconsistent (including apparent near-`180°` mismatches).
-
-## Debugging and Artifacts
-
-Each run creates a unique output directory with subfolders:
-
-- `main_frames/`: sampled primary frames
-- `secondary_frames/`: temporal frames grouped by parent main frame
-- `motion_vectors/`: optical-flow overlays, region vectors, pair decisions
-- `line_detection/`: main-frame structural outcomes (used/discarded with reason)
-
-All debug side effects are centralized in `debug_utils.py`; processing modules return data structures and do not write files directly.
-
-File naming encodes traceability details such as frame type, global frame index, parent relationship, and status (`used` / `discarded_*`).
-
-Terminal logs are structured to trace lifecycle events at:
-
-- Main frame level
-- Secondary frame level
-- Motion pair level
-- Region level (valid/invalid + reason)
-
-This enables direct mapping from console output to saved artifacts and final decisions.
-
-## Limitations
-
-- Requires sufficient motion: static or near-static scenes may not provide reliable directional constraints.
-- Sensitive to low texture/noisy regions: optical flow may degrade in blurred, flat, or compression-heavy content.
-
-## Environment Configuration
-
-Configuration is loaded from `.env` (if present) and environment variables. Current keys:
-
-- `VPD_PROJECT_ROOT`
-- `VPD_FRAMES_OUTPUT_DIR`
-- `VPD_DEBUG_OUTPUT_DIR`
-- `VPD_MIN_FRAMES_ANALYZED`
-- `VPD_MAX_DISCARD_RATIO`
-- `VPD_MIN_LAYOUT_SCORE_MARGIN`
-- `VPD_FFT_MIN_MARGIN` (Minimum EAC/cubic margin for FFT tiebreaker activation, default: 0.08)
-- `VPD_LINE_CENTER_BAND_RATIO`
-- `VPD_LINE_CENTER_MAX_DISTANCE_RATIO`
-- `VPD_STEREO_HIST_THRESHOLD`
-- `VPD_SAVE_STEREO_HALVES`
-- `VPD_FLOW_ALGORITHM` – Flow algorithm for motion analysis (farneback or dis, default: farneback)
-
-Defaults and loading behavior are defined in `pipeline.py`.
-
-   
+The motion-analysis branch requires sufficient camera or scene motion. Near-
+static 360° content may produce low-confidence results and a final classification
+of `unknown`, which then triggers the EAC fallback during conversion.

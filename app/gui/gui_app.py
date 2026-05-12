@@ -11,7 +11,6 @@ from __future__ import annotations
 import enum
 import io
 import logging
-import math
 import threading
 import time
 import tkinter
@@ -22,6 +21,12 @@ from typing import Any, Dict, List, Optional
 import customtkinter as ctk
 from PIL import Image
 
+from app.gui.progress_utils import (
+    DOWNLOAD_PROGRESS_UPDATE_MS,
+    clamp_progress,
+    compute_progress_update_delay_ms,
+    extract_download_progress_fraction,
+)
 from config.logging_config import setup_logging
 from config.settings import get_settings
 from utils.exceptions import (
@@ -41,7 +46,6 @@ _THUMB_CARD   = (120, 68)
 _THUMB_DETAIL = (320, 180)
 _PAGE_SIZE    = 5
 _ACCENT       = "#1a7fd4"
-_DOWNLOAD_PROGRESS_UPDATE_MS = 120
 
 
 # ── App state ─────────────────────────────────────────────────────────────────
@@ -118,51 +122,6 @@ def _grey_image(size: tuple) -> ctk.CTkImage:
     """Return a neutral grey placeholder CTkImage."""
     img = Image.new("RGB", size, color=(210, 210, 210))
     return ctk.CTkImage(light_image=img, size=size)
-
-
-def _clamp_progress(value: float) -> float:
-    """Clamp a progress value to the [0.0, 1.0] range."""
-    return max(0.0, min(1.0, value))
-
-
-def _as_positive_float(value: Any) -> Optional[float]:
-    """Return a finite positive float, or None."""
-    try:
-        v = float(value)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(v) or v <= 0:
-        return None
-    return v
-
-
-def _extract_download_progress_fraction(payload: Dict[str, Any]) -> Optional[float]:
-    """Extract download progress from yt-dlp hook payload."""
-    downloaded = _as_positive_float(payload.get("downloaded_bytes"))
-    total = _as_positive_float(payload.get("total_bytes"))
-    if total is None:
-        total = _as_positive_float(payload.get("total_bytes_estimate"))
-    if downloaded is not None and total is not None:
-        return _clamp_progress(downloaded / total)
-
-    pct_raw = str(payload.get("_percent_str") or "").strip()
-    if pct_raw.endswith("%"):
-        pct_raw = pct_raw[:-1]
-    try:
-        return _clamp_progress(float(pct_raw.strip()) / 100.0)
-    except ValueError:
-        return None
-
-
-def _compute_progress_update_delay_ms(
-    *,
-    last_update_monotonic: float,
-    now_monotonic: float,
-    min_interval_ms: int = _DOWNLOAD_PROGRESS_UPDATE_MS,
-) -> int:
-    """Return coalesced scheduling delay in milliseconds."""
-    elapsed_ms = int((now_monotonic - last_update_monotonic) * 1000)
-    return max(0, min_interval_ms - elapsed_ms)
 
 
 # ── Main application ──────────────────────────────────────────────────────────
@@ -416,7 +375,7 @@ class VR360ManagerApp:
     def _progress_set_determinate(self, value: float, status: Optional[str] = None) -> None:
         self._progress.stop()
         self._progress.configure(mode="determinate")
-        self._progress.set(_clamp_progress(value))
+        self._progress.set(clamp_progress(value))
         if status is not None:
             self._set_status(status)
 
@@ -442,7 +401,7 @@ class VR360ManagerApp:
         with self._download_progress_lock:
             if self._download_progress_scheduled:
                 return
-            delay_ms = _compute_progress_update_delay_ms(
+            delay_ms = compute_progress_update_delay_ms(
                 last_update_monotonic=self._download_progress_last_ts,
                 now_monotonic=time.monotonic(),
             )
@@ -723,7 +682,7 @@ class VR360ManagerApp:
         def _prog(d: dict) -> None:
             status = d.get("status")
             if status == "downloading":
-                frac = _extract_download_progress_fraction(d)
+                frac = extract_download_progress_fraction(d)
                 pct_lbl = str(d.get("_percent_str") or "").strip()
                 if not pct_lbl and frac is not None:
                     pct_lbl = f"{frac * 100:.1f}%"

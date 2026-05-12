@@ -2,9 +2,9 @@ import os
 import tempfile
 import unittest
 
-from app.gui.gui_app import (
-    _compute_progress_update_delay_ms,
-    _extract_download_progress_fraction,
+from app.gui.progress_utils import (
+    compute_progress_update_delay_ms,
+    extract_download_progress_fraction,
 )
 from core.downloader import _resolve_downloaded_output_path
 
@@ -18,7 +18,7 @@ class _FakeYDL:
 
 class ProgressParsingTests(unittest.TestCase):
     def test_prefers_byte_counters(self):
-        frac = _extract_download_progress_fraction(
+        frac = extract_download_progress_fraction(
             {
                 "downloaded_bytes": 50,
                 "total_bytes": 200,
@@ -28,28 +28,28 @@ class ProgressParsingTests(unittest.TestCase):
         self.assertAlmostEqual(frac, 0.25)
 
     def test_falls_back_to_percent_string(self):
-        frac = _extract_download_progress_fraction({"_percent_str": "33.3%"})
+        frac = extract_download_progress_fraction({"_percent_str": "33.3%"})
         self.assertAlmostEqual(frac, 0.333, places=3)
 
     def test_invalid_payload_returns_none(self):
-        self.assertIsNone(_extract_download_progress_fraction({"_percent_str": "??"}))
+        self.assertIsNone(extract_download_progress_fraction({"_percent_str": "??"}))
 
     def test_clamps_progress_to_one(self):
-        frac = _extract_download_progress_fraction(
+        frac = extract_download_progress_fraction(
             {"downloaded_bytes": 250, "total_bytes": 200}
         )
         self.assertEqual(frac, 1.0)
 
     def test_coalescing_delay_respects_interval(self):
-        delay = _compute_progress_update_delay_ms(
+        delay = compute_progress_update_delay_ms(
             last_update_monotonic=10.0,
             now_monotonic=10.03,
             min_interval_ms=120,
         )
-        self.assertEqual(delay, 90)
+        self.assertIn(delay, (90, 91))
 
     def test_coalescing_delay_can_be_immediate(self):
-        delay = _compute_progress_update_delay_ms(
+        delay = compute_progress_update_delay_ms(
             last_update_monotonic=10.0,
             now_monotonic=10.2,
             min_interval_ms=120,

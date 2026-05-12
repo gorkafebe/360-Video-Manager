@@ -12,6 +12,7 @@ import enum
 import io
 import logging
 import threading
+import time
 import tkinter
 import tkinter.messagebox
 import urllib.request
@@ -20,6 +21,12 @@ from typing import Any, Dict, List, Optional
 import customtkinter as ctk
 from PIL import Image
 
+from app.gui.progress_utils import (
+    DOWNLOAD_PROGRESS_UPDATE_MS,
+    clamp_progress,
+    compute_progress_update_delay_ms,
+    extract_download_progress_fraction,
+)
 from config.logging_config import setup_logging
 from config.settings import get_settings
 from utils.exceptions import (
@@ -141,6 +148,10 @@ class VR360ManagerApp:
         self._playlists:    List[Dict]            = []
         self._log_visible:  bool                  = False
         self._status_var  = tkinter.StringVar(value="Ready")
+        self._download_progress_lock = threading.Lock()
+        self._download_progress_pending: Optional[tuple[Optional[float], str]] = None
+        self._download_progress_scheduled: bool = False
+        self._download_progress_last_ts: float = 0.0
 
         self._build_ui()
         self._attach_log_handler()
@@ -353,6 +364,71 @@ class VR360ManagerApp:
     def _set_status(self, text: str) -> None:
         self._status_var.set(text)
 
+    def _progress_reset(self, status: Optional[str] = None) -> None:
+        self._clear_download_progress_queue()
+        self._progress.stop()
+        self._progress.configure(mode="determinate")
+        self._progress.set(0)
+        if status is not None:
+            self._set_status(status)
+
+    def _progress_set_determinate(self, value: float, status: Optional[str] = None) -> None:
+        self._progress.stop()
+        self._progress.configure(mode="determinate")
+        self._progress.set(clamp_progress(value))
+        if status is not None:
+            self._set_status(status)
+
+    def _progress_start_indeterminate(self, status: Optional[str] = None) -> None:
+        self._progress.stop()
+        self._progress.configure(mode="indeterminate")
+        self._progress.start()
+        if status is not None:
+            self._set_status(status)
+
+    def _clear_download_progress_queue(self) -> None:
+        with self._download_progress_lock:
+            self._download_progress_pending = None
+
+    def _queue_download_progress_update(self, progress: Optional[float], status: str) -> None:
+        with self._download_progress_lock:
+            self._download_progress_pending = (progress, status)
+            if self._download_progress_scheduled:
+                return
+        self._schedule_download_progress_flush()
+
+    def _schedule_download_progress_flush(self) -> None:
+        with self._download_progress_lock:
+            if self._download_progress_scheduled:
+                return
+            delay_ms = compute_progress_update_delay_ms(
+                last_update_monotonic=self._download_progress_last_ts,
+                now_monotonic=time.monotonic(),
+            )
+            self._download_progress_scheduled = True
+        self.master.after(delay_ms, self._flush_download_progress_update)
+
+    def _flush_download_progress_update(self) -> None:
+        with self._download_progress_lock:
+            pending = self._download_progress_pending
+            self._download_progress_pending = None
+            self._download_progress_scheduled = False
+            self._download_progress_last_ts = time.monotonic()
+
+        if not pending:
+            return
+
+        progress, status = pending
+        if progress is None:
+            self._progress_start_indeterminate(status)
+        else:
+            self._progress_set_determinate(progress, status)
+
+        with self._download_progress_lock:
+            has_more = self._download_progress_pending is not None
+        if has_more:
+            self._schedule_download_progress_flush()
+
     # ── Log toggle ────────────────────────────────────────────────────────────
 
     def _toggle_log(self) -> None:
@@ -373,9 +449,7 @@ class VR360ManagerApp:
             return
         self._max_results = _PAGE_SIZE
         self._set_state(AppState.SEARCHING)
-        self._set_status("Searching…")
-        self._progress.configure(mode="indeterminate")
-        self._progress.start()
+        self._progress_start_indeterminate("Searching…")
         threading.Thread(
             target=self._bg_search, args=(query, self._max_results), daemon=True,
         ).start()
@@ -386,9 +460,7 @@ class VR360ManagerApp:
             return
         self._max_results += _PAGE_SIZE
         self._set_state(AppState.SEARCHING)
-        self._set_status("Loading more results…")
-        self._progress.configure(mode="indeterminate")
-        self._progress.start()
+        self._progress_start_indeterminate("Loading more results…")
         threading.Thread(
             target=self._bg_search, args=(query, self._max_results), daemon=True,
         ).start()
@@ -403,9 +475,7 @@ class VR360ManagerApp:
         self.master.after(0, lambda r=results: self._on_search_done(r))
 
     def _on_search_done(self, results: List[Dict]) -> None:
-        self._progress.stop()
-        self._progress.configure(mode="determinate")
-        self._progress.set(0)
+        self._progress_reset()
         self._results = results
         self._render_cards(results)
         n = len(results)
@@ -417,9 +487,7 @@ class VR360ManagerApp:
         self._set_state(AppState.IDLE)
 
     def _on_search_error(self, msg: str) -> None:
-        self._progress.stop()
-        self._progress.configure(mode="determinate")
-        self._progress.set(0)
+        self._progress_reset()
         self._set_state(AppState.IDLE)
         self._set_status("Search failed.")
         tkinter.messagebox.showerror("Search error", msg)
@@ -605,8 +673,7 @@ class VR360ManagerApp:
             return
         self._ready_path = None
         self._set_state(AppState.PROCESSING)
-        self._set_status("Starting download…")
-        self._progress.set(0)
+        self._progress_reset("Starting download…")
         threading.Thread(target=self._bg_process, args=(url,), daemon=True).start()
 
     def _bg_process(self, url: str) -> None:
@@ -615,24 +682,17 @@ class VR360ManagerApp:
         def _prog(d: dict) -> None:
             status = d.get("status")
             if status == "downloading":
-                pct_str = (d.get("_percent_str") or "0%").strip()
-                try:
-                    pct = float(pct_str.rstrip("%")) / 100.0
-                except ValueError:
-                    pct = 0.0
-
-                def _upd_dl(p=pct, s=pct_str):
-                    self._progress.configure(mode="determinate")
-                    self._progress.set(p)
-                    self._set_status(f"Downloading… {s}")
-
-                self.master.after(0, _upd_dl)
+                frac = extract_download_progress_fraction(d)
+                pct_lbl = str(d.get("_percent_str") or "").strip()
+                if not pct_lbl and frac is not None:
+                    pct_lbl = f"{frac * 100:.1f}%"
+                status_msg = f"Downloading… {pct_lbl}".rstrip()
+                self._queue_download_progress_update(frac, status_msg)
 
             elif status == "finished":
+                self._clear_download_progress_queue()
                 def _upd_proc():
-                    self._progress.configure(mode="indeterminate")
-                    self._progress.start()
-                    self._set_status("Processing… (see log for details)")
+                    self._progress_start_indeterminate("Processing… (see log for details)")
 
                 self.master.after(0, _upd_proc)
 
@@ -650,6 +710,7 @@ class VR360ManagerApp:
         self.master.after(0, lambda r=result: self._on_process_done(r))
 
     def _on_process_done(self, result) -> None:
+        self._clear_download_progress_queue()
         self._progress.stop()
         self._progress.configure(mode="determinate")
         if not result.success:
@@ -677,9 +738,7 @@ class VR360ManagerApp:
         )
 
     def _on_process_error(self, msg: str) -> None:
-        self._progress.stop()
-        self._progress.configure(mode="determinate")
-        self._progress.set(0)
+        self._progress_reset()
         self._set_state(AppState.READY if self._selected else AppState.IDLE)
         self._set_status("Processing failed.")
         tkinter.messagebox.showerror("Processing error", msg)
@@ -699,9 +758,7 @@ class VR360ManagerApp:
             return
         playlist_id = self._get_playlist_id()
         self._set_state(AppState.UPLOADING)
-        self._set_status("Uploading…")
-        self._progress.configure(mode="indeterminate")
-        self._progress.start()
+        self._progress_start_indeterminate("Uploading…")
         threading.Thread(
             target=self._bg_upload,
             args=(self._ready_path, title, playlist_id),
@@ -740,9 +797,7 @@ class VR360ManagerApp:
             tkinter.messagebox.showerror("Upload failed", result.error or "Unknown error")
 
     def _on_upload_error(self, msg: str) -> None:
-        self._progress.stop()
-        self._progress.configure(mode="determinate")
-        self._progress.set(0)
+        self._progress_reset()
         self._set_state(AppState.PROCESSED)
         self._set_status("Upload failed.")
         tkinter.messagebox.showerror("Upload error", msg)

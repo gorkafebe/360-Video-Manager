@@ -13,12 +13,76 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Callable, Optional
+from typing import Any, Callable, Dict, Iterable, Optional
 
 from utils.exceptions import DownloadError
 
 
 logger = logging.getLogger(__name__)
+
+
+def _iter_candidate_output_paths(ydl: Any, info: Dict[str, Any]) -> Iterable[str]:
+    """Yield candidate output file paths for a completed yt-dlp download."""
+    requested_downloads = info.get("requested_downloads")
+    if isinstance(requested_downloads, list):
+        for entry in requested_downloads:
+            if not isinstance(entry, dict):
+                continue
+            for key in ("filepath", "filename", "_filename"):
+                value = entry.get(key)
+                if value:
+                    yield str(value)
+
+    for key in ("filepath", "filename", "_filename"):
+        value = info.get(key)
+        if value:
+            yield str(value)
+
+    try:
+        prepared = ydl.prepare_filename(info)
+    except Exception:
+        prepared = None
+
+    if prepared:
+        yield prepared
+        base, _ = os.path.splitext(prepared)
+        yield f"{base}.mp4"
+        info_mp4 = dict(info)
+        info_mp4["ext"] = "mp4"
+        try:
+            yield ydl.prepare_filename(info_mp4)
+        except Exception:
+            pass
+
+
+def _resolve_downloaded_output_path(ydl: Any, info: Dict[str, Any]) -> Optional[str]:
+    """Resolve the final output file path emitted by yt-dlp."""
+    seen = set()
+    for candidate in _iter_candidate_output_paths(ydl, info):
+        if not candidate:
+            continue
+        path = os.path.abspath(candidate)
+        if path in seen:
+            continue
+        seen.add(path)
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def _collect_output_candidates(ydl: Any, info: Dict[str, Any]) -> list[str]:
+    """Collect unique absolute candidate paths for logging/debugging."""
+    seen = set()
+    paths: list[str] = []
+    for candidate in _iter_candidate_output_paths(ydl, info):
+        if not candidate:
+            continue
+        path = os.path.abspath(candidate)
+        if path in seen:
+            continue
+        seen.add(path)
+        paths.append(path)
+    return paths
 
 
 def download_video(
@@ -81,9 +145,13 @@ def download_video(
     try:
         with YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
-            filename = ydl.prepare_filename(info)
-            if not os.path.exists(filename):
-                raise DownloadError(f"Downloaded file not found: {filename}")
+            filename = _resolve_downloaded_output_path(ydl, info)
+            if not filename or not os.path.exists(filename):
+                checked = _collect_output_candidates(ydl, info)
+                logger.error("yt-dlp completed but output file was not found. Checked: %s", checked)
+                raise DownloadError(
+                    f"Downloaded file not found after yt-dlp completed. Checked paths: {checked}"
+                )
             logger.info("Downloaded: %s", filename)
             return filename
 

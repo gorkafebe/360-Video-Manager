@@ -70,6 +70,21 @@ def _resolve_downloaded_output_path(ydl: Any, info: Dict[str, Any]) -> Optional[
     return None
 
 
+def _collect_output_candidates(ydl: Any, info: Dict[str, Any]) -> list[str]:
+    """Collect unique absolute candidate paths for logging/debugging."""
+    seen = set()
+    paths: list[str] = []
+    for candidate in _iter_candidate_output_paths(ydl, info):
+        if not candidate:
+            continue
+        path = os.path.abspath(candidate)
+        if path in seen:
+            continue
+        seen.add(path)
+        paths.append(path)
+    return paths
+
+
 def download_video(
     url: str,
     output_dir: Optional[str] = None,
@@ -132,7 +147,11 @@ def download_video(
             info = ydl.extract_info(url, download=True)
             filename = _resolve_downloaded_output_path(ydl, info)
             if not filename or not os.path.exists(filename):
-                raise DownloadError("Downloaded file not found after yt-dlp completed.")
+                checked = _collect_output_candidates(ydl, info)
+                logger.error("yt-dlp completed but output file was not found. Checked: %s", checked)
+                raise DownloadError(
+                    f"Downloaded file not found after yt-dlp completed. Checked paths: {checked}"
+                )
             logger.info("Downloaded: %s", filename)
             return filename
 

@@ -46,7 +46,8 @@ class ProgressParsingTests(unittest.TestCase):
             now_monotonic=10.03,
             min_interval_ms=120,
         )
-        self.assertIn(delay, (90, 91))
+        self.assertGreaterEqual(delay, 90)
+        self.assertLessEqual(delay, 91)
 
     def test_coalescing_delay_can_be_immediate(self):
         delay = compute_progress_update_delay_ms(

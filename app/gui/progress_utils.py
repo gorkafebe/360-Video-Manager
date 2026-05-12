@@ -14,20 +14,28 @@ def clamp_progress(value: float) -> float:
     return max(0.0, min(1.0, value))
 
 
-def as_positive_float(value: Any) -> Optional[float]:
-    """Return a finite positive float, or None."""
+def as_non_negative_float(value: Any) -> Optional[float]:
+    """Return a finite non-negative float, or None."""
     try:
         v = float(value)
     except (TypeError, ValueError):
         return None
-    if not math.isfinite(v) or v <= 0:
+    if not math.isfinite(v) or v < 0:
+        return None
+    return v
+
+
+def as_positive_float(value: Any) -> Optional[float]:
+    """Return a finite strictly-positive float, or None."""
+    v = as_non_negative_float(value)
+    if v is None or v == 0:
         return None
     return v
 
 
 def extract_download_progress_fraction(payload: Dict[str, Any]) -> Optional[float]:
     """Extract download progress from yt-dlp hook payload."""
-    downloaded = as_positive_float(payload.get("downloaded_bytes"))
+    downloaded = as_non_negative_float(payload.get("downloaded_bytes"))
     total = as_positive_float(payload.get("total_bytes"))
     if total is None:
         total = as_positive_float(payload.get("total_bytes_estimate"))

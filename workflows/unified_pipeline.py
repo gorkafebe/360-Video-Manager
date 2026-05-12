@@ -248,12 +248,18 @@ def _stage_convert_to_equirectangular(
 
     Returns the converted path, or None when conversion was skipped.
     """
-    if projection_type in ("equirectangular", "stereo_equi", "unknown"):
+    if projection_type in ("equirectangular", "stereo_equi"):
         logger.info(
             "Conversion skipped: projection=%s does not require remapping.",
             projection_type,
         )
         return None
+
+    if projection_type == "unknown":
+        logger.warning(
+            "Projection detection returned 'unknown'; falling back to EAC for conversion."
+        )
+        projection_type = "eac"
 
     if confidence < confidence_threshold:
         logger.info(

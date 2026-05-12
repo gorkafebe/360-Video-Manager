@@ -143,9 +143,10 @@ class VR360ManagerApp:
         self._max_results:  int                   = _PAGE_SIZE
         self._selected:     Optional[Dict]        = None
         self._ready_path:   Optional[str]         = None
-        self._cards:        List[ctk.CTkFrame]    = []
-        self._res_children: List                  = []   # all widgets in results_frame
-        self._playlists:    List[Dict]            = []
+        self._cards:             List[ctk.CTkFrame]    = []
+        self._res_children:      List                  = []   # all widgets in results_frame
+        self._card_title_labels: List[ctk.CTkLabel]   = []   # for adaptive wraplength
+        self._playlists:         List[Dict]            = []
         self._log_visible:  bool                  = False
         self._status_var  = tkinter.StringVar(value="Ready")
         self._download_progress_lock = threading.Lock()
@@ -164,9 +165,21 @@ class VR360ManagerApp:
     def _build_ui(self) -> None:
         root_frame = ctk.CTkFrame(self.master, fg_color="transparent")
         root_frame.pack(fill="both", expand=True, padx=16, pady=12)
+        # Row 0 grows with the window; row 1 (bottom actions) stays fixed.
+        root_frame.grid_rowconfigure(0, weight=1)
+        root_frame.grid_rowconfigure(1, weight=0)
+        root_frame.grid_columnconfigure(0, weight=1)
+
+        # ── Scrollable content area (top, fills available height) ──
+        content = ctk.CTkScrollableFrame(root_frame, fg_color="transparent")
+        content.grid(row=0, column=0, sticky="nsew", pady=(0, 6))
+
+        # ── Fixed action area (bottom, always visible) ──
+        bottom = ctk.CTkFrame(root_frame, fg_color="transparent")
+        bottom.grid(row=1, column=0, sticky="ew")
 
         # ── Search row ──
-        search_row = ctk.CTkFrame(root_frame, fg_color="transparent")
+        search_row = ctk.CTkFrame(content, fg_color="transparent")
         search_row.pack(fill="x", pady=(0, 8))
 
         self._search_entry = ctk.CTkEntry(
@@ -185,15 +198,15 @@ class VR360ManagerApp:
 
         # ── Results ──
         ctk.CTkLabel(
-            root_frame, text="Results",
+            content, text="Results",
             font=ctk.CTkFont(size=13, weight="bold"), anchor="w",
         ).pack(fill="x", pady=(4, 2))
 
-        self._results_frame = ctk.CTkScrollableFrame(root_frame, height=220)
+        self._results_frame = ctk.CTkScrollableFrame(content, height=220)
         self._results_frame.pack(fill="x")
 
         # Container for "Show more" — always in layout; child shown/hidden
-        _sm_cont = ctk.CTkFrame(root_frame, fg_color="transparent")
+        _sm_cont = ctk.CTkFrame(content, fg_color="transparent")
         _sm_cont.pack(fill="x")
         self._show_more_btn = ctk.CTkButton(
             _sm_cont,
@@ -208,12 +221,12 @@ class VR360ManagerApp:
 
         # ── Selected video panel ──
         ctk.CTkLabel(
-            root_frame, text="Selected video",
+            content, text="Selected video",
             font=ctk.CTkFont(size=13, weight="bold"), anchor="w",
         ).pack(fill="x", pady=(10, 2))
 
         detail = ctk.CTkFrame(
-            root_frame, corner_radius=8,
+            content, corner_radius=8,
             border_width=1, border_color=("gray80", "gray30"),
         )
         detail.pack(fill="x")
@@ -248,14 +261,17 @@ class VR360ManagerApp:
         )
         self._detail_url_lbl.pack(fill="x", pady=(2, 0))
 
+        # Bind for adaptive detail-title wraplength
+        info.bind("<Configure>", self._on_info_resize)
+
         # ── Upload options ──
         ctk.CTkLabel(
-            root_frame, text="Upload options",
+            content, text="Upload options",
             font=ctk.CTkFont(size=13, weight="bold"), anchor="w",
         ).pack(fill="x", pady=(10, 2))
 
         upload_opts = ctk.CTkFrame(
-            root_frame, corner_radius=8,
+            content, corner_radius=8,
             border_width=1, border_color=("gray80", "gray30"),
         )
         upload_opts.pack(fill="x")
@@ -284,9 +300,9 @@ class VR360ManagerApp:
             command=self._on_new_playlist,
         ).grid(row=1, column=2, padx=(0, 12), pady=(4, 10))
 
-        # ── Action buttons ──
-        actions = ctk.CTkFrame(root_frame, fg_color="transparent")
-        actions.pack(fill="x", pady=(10, 4))
+        # ── Action buttons (in always-visible bottom frame) ──
+        actions = ctk.CTkFrame(bottom, fg_color="transparent")
+        actions.pack(fill="x", pady=(6, 4))
 
         self._dl_btn = ctk.CTkButton(
             actions,
@@ -311,20 +327,20 @@ class VR360ManagerApp:
         self._up_btn.pack(side="left", fill="x", expand=True, padx=(6, 0))
 
         # ── Progress bar ──
-        self._progress = ctk.CTkProgressBar(root_frame, height=10)
+        self._progress = ctk.CTkProgressBar(bottom, height=10)
         self._progress.pack(fill="x", pady=(8, 2))
         self._progress.set(0)
 
         # ── Status label ──
         self._status_lbl = ctk.CTkLabel(
-            root_frame, textvariable=self._status_var,
+            bottom, textvariable=self._status_var,
             anchor="w", font=ctk.CTkFont(size=12),
         )
         self._status_lbl.pack(fill="x")
 
         # ── Log toggle ──
         self._log_toggle_btn = ctk.CTkButton(
-            root_frame,
+            bottom,
             text="▶  Show log",
             fg_color="transparent",
             text_color=("gray45", "gray65"),
@@ -335,8 +351,8 @@ class VR360ManagerApp:
         )
         self._log_toggle_btn.pack(fill="x", pady=(4, 0))
 
-        # ── Log panel (inside a container; container always packed) ──
-        self._log_container = ctk.CTkFrame(root_frame, fg_color="transparent")
+        # ── Log panel (inside bottom container; text box shown/hidden on toggle) ──
+        self._log_container = ctk.CTkFrame(bottom, fg_color="transparent")
         self._log_container.pack(fill="x")
         self._log_box = ctk.CTkTextbox(
             self._log_container,
@@ -346,10 +362,34 @@ class VR360ManagerApp:
         )
         # Not packed until toggled on
 
+        # Bind master resize for adaptive card-title wraplengths
+        self.master.bind("<Configure>", self._on_root_resize)
+
     def _attach_log_handler(self) -> None:
         handler = GUILogHandler(self._log_box, self.master)
         handler.setLevel(logging.DEBUG)
         logging.getLogger().addHandler(handler)
+
+    # ── Adaptive resize handlers ──────────────────────────────────────────────
+
+    def _on_info_resize(self, event) -> None:
+        """Recalculate detail-title wraplength when its container is resized."""
+        w = event.width
+        if w > 1:
+            self._detail_title_lbl.configure(wraplength=max(100, w - 8))
+
+    def _on_root_resize(self, event) -> None:
+        """Recalculate card-title wraplengths when the root window is resized."""
+        if event.widget is not self.master:
+            return
+        w = event.width
+        # Subtract root padx (32), scrollbar (~16), thumb width, thumb padx (32), inner pad (~20)
+        card_wrap = max(150, w - 32 - _THUMB_CARD[0] - 68)
+        for lbl in self._card_title_labels:
+            try:
+                lbl.configure(wraplength=card_wrap)
+            except Exception:
+                pass
 
     # ── State machine ─────────────────────────────────────────────────────────
 
@@ -503,6 +543,7 @@ class VR360ManagerApp:
                 pass
         self._res_children.clear()
         self._cards.clear()
+        self._card_title_labels.clear()
         self._selected   = None
         self._ready_path = None
 
@@ -550,6 +591,7 @@ class VR360ManagerApp:
             anchor="w", wraplength=600,
         )
         title_lbl.pack(fill="x")
+        self._card_title_labels.append(title_lbl)
 
         ch_lbl = ctk.CTkLabel(
             txt,

@@ -340,7 +340,7 @@ root. Defaults shown are the values used when a variable is not set.
 | `CMS_USER` | `$USER` | MediaCMS username for HTTP Basic Auth |
 | `CMS_PASSWORD` | — | MediaCMS password |
 | `CMS_TOKEN` | — | MediaCMS CSRF token |
-| `CMS_UPLOAD_CONNECT_TIMEOUT` | `120` | Connect/write timeout in seconds used while uploading media files |
+| `CMS_UPLOAD_CONNECT_TIMEOUT` | `120` | Connection timeout in seconds used for media upload requests |
 | `CMS_UPLOAD_READ_TIMEOUT` | `1800` | Response-read timeout in seconds for upload requests |
 | `VPD_PROJECT_ROOT` | auto-detected | Override the project root directory |
 | `DOWNLOADS_DIR` | `data/downloads` | Download and conversion output directory |

@@ -11,7 +11,7 @@ CMS_API_URL             MediaCMS API endpoint, e.g. https://cms.example.com/api/
 CMS_USER                MediaCMS username for HTTP basic auth.
 CMS_PASSWORD            MediaCMS password for HTTP basic auth.
 CMS_TOKEN               MediaCMS CSRF token.
-CMS_UPLOAD_CONNECT_TIMEOUT  Connect/write timeout (seconds) for MediaCMS upload.
+CMS_UPLOAD_CONNECT_TIMEOUT  Connection timeout (seconds) for MediaCMS upload.
 CMS_UPLOAD_READ_TIMEOUT     Response-read timeout (seconds) for MediaCMS upload.
 
 VPD_PROJECT_ROOT        Override the auto-detected project root.

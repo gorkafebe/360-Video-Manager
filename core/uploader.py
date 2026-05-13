@@ -162,7 +162,12 @@ def upload_video_asset(
     auth = _get_auth()
 
     from config.settings import get_settings
-    token = get_settings().cms_token
+    cfg = get_settings()
+    token = cfg.cms_token
+    upload_timeout = (
+        cfg.cms_upload_connect_timeout,
+        cfg.cms_upload_read_timeout,
+    )
     headers = {
         "accept": "application/json",
         **({"X-CSRFToken": token} if token else {}),
@@ -178,7 +183,7 @@ def upload_video_asset(
                 files=files,
                 data=data,
                 auth=auth,
-                timeout=_REQUEST_TIMEOUT,
+                timeout=upload_timeout,
             )
 
         if response.status_code not in (200, 201):
@@ -211,6 +216,12 @@ def upload_video_asset(
     except requests.Timeout as exc:
         raise MediaCMSError(
             "Upload timed out. Check CMS_API_URL and network connectivity."
+        ) from exc
+    except requests.ConnectionError as exc:
+        raise MediaCMSError(
+            "Upload connection was interrupted or timed out while sending data. "
+            "Check CMS reachability and increase CMS_UPLOAD_CONNECT_TIMEOUT / "
+            "CMS_UPLOAD_READ_TIMEOUT for large videos."
         ) from exc
     except MediaCMSError:
         raise

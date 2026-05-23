@@ -368,48 +368,12 @@ Current test files:
 |---|---|
 | `tests/test_progress_and_downloader.py` | Download-progress parsing, rate-limiting delay, yt-dlp output-path resolution |
 | `tests/test_fallback_and_adaptive.py` | `unknown → eac` conversion fallback; `equirectangular`/`stereo_equi` skip behaviour; low-confidence skip; adaptive wraplength formula |
+| `tests/test_uploader.py` | Playlist endpoint URL construction; robustness against trailing slashes and non-`/media` API paths |
+| `tests/test_youtube.py` | Ordered de-duplication of search results; 360° projection filter; URL video ID extraction |
 
 ---
 
 ## Known issues / caveats
-
-### `confidence=` parameter mismatch (runtime `TypeError` on conversion)
-
-`workflows/unified_pipeline.py` calls `convert_detected_projection_to_equirectangular`
-with a `confidence=` keyword argument:
-
-```python
-converted = convert_detected_projection_to_equirectangular(
-    video_path=video_path,
-    projection_type=projection_type,
-    confidence=confidence,      # ← not in function signature
-    output_dir=output_dir,
-)
-```
-
-The actual signature in `detector/projection_conversion.py` is:
-
-```python
-def convert_detected_projection_to_equirectangular(
-    video_path: str,
-    projection_type: str,
-    output_dir: Optional[str] = None,
-    name_source_path: Optional[str] = None,
-) -> Dict[str, Any]:
-```
-
-Passing `confidence=` raises a `TypeError` at runtime whenever conversion is
-attempted (i.e. for `eac`, `cubic`, or `unknown` projections above the
-confidence threshold). The conversion stage will fail for those cases until
-this mismatch is fixed.
-
-### Return-type mismatch in `_stage_convert_to_equirectangular`
-
-`convert_detected_projection_to_equirectangular` returns a `Dict[str, Any]`,
-but `_stage_convert_to_equirectangular` in `unified_pipeline.py` treats the
-return value as a file-path string (comparing it with `!= video_path` and
-storing it in `result.converted_video_path`). This is a secondary bug that
-would surface once the `confidence=` TypeError is resolved.
 
 ### Virtualenv committed to the repository
 

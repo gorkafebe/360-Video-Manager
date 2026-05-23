@@ -105,12 +105,14 @@ def search_videos(
 
     try:
         client = youtube_client or build("youtube", "v3", developerKey=key)
-        all_video_ids: set = set()
+        all_video_ids: list = []
+        _seen_ids: set = set()
 
         is_url = "youtube.com" in query.lower() or "youtu.be" in query.lower()
         if is_url:
             video_id = extract_video_id(query)
-            all_video_ids.add(video_id)
+            all_video_ids.append(video_id)
+            _seen_ids.add(video_id)
         else:
             search_response = client.search().list(
                 part="snippet",
@@ -125,8 +127,9 @@ def search_videos(
 
             for item in items:
                 v_id = item.get("id", {}).get("videoId")
-                if v_id:
-                    all_video_ids.add(v_id)
+                if v_id and v_id not in _seen_ids:
+                    all_video_ids.append(v_id)
+                    _seen_ids.add(v_id)
 
         if not all_video_ids:
             return []

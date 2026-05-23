@@ -277,12 +277,12 @@ def _stage_convert_to_equirectangular(
     converted = convert_detected_projection_to_equirectangular(
         video_path=video_path,
         projection_type=projection_type,
-        confidence=confidence,
         output_dir=output_dir,
     )
-    if converted and converted != video_path:
-        logger.info("Conversion complete: %s", converted)
-        return converted
+    output_path = converted.get("output_path") if converted.get("success") else None
+    if output_path:
+        logger.info("Conversion complete: %s", output_path)
+        return output_path
 
     logger.warning("Conversion returned unchanged path or None; treating as skipped.")
     return None

@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import os
 from typing import Dict, List, Optional, Any
+from urllib.parse import urljoin, urlparse
 
 from utils.exceptions import MediaCMSError
 from core.models import UploadResult
@@ -56,11 +57,31 @@ def _get_api_url(api_url: Optional[str] = None) -> str:
     return url
 
 
+def _build_endpoint(api_url: str, path: str) -> str:
+    """Build an absolute endpoint URL from *api_url* and a *path* suffix.
+
+    Strips the path component of *api_url* down to the scheme+host so that
+    the result is independent of whether *api_url* ends with ``/media``,
+    ``/api/v1/media``, or any other suffix.
+
+    Example::
+
+        _build_endpoint("https://cms.example.com/api/v1/media", "/playlists/")
+        # -> "https://cms.example.com/playlists/"
+    """
+    parsed = urlparse(api_url)
+    base = f"{parsed.scheme}://{parsed.netloc}"
+    # Ensure path starts with a slash for urljoin to work correctly.
+    if not path.startswith("/"):
+        path = "/" + path
+    return base + path
+
+
 def get_playlists(api_url: Optional[str] = None) -> List[Dict[str, Any]]:
     """Return the list of existing MediaCMS playlists."""
     import requests  # type: ignore
     url = _get_api_url(api_url)
-    endpoint = url.replace("/media", "/playlists")
+    endpoint = _build_endpoint(url, "/playlists")
     auth = _get_auth()
     try:
         resp = requests.get(endpoint, auth=auth, timeout=_REQUEST_TIMEOUT)
@@ -81,7 +102,7 @@ def create_playlist(title: str, api_url: Optional[str] = None) -> Optional[str]:
     """Create a new public playlist and return its ID, or None on failure."""
     import requests  # type: ignore
     url = _get_api_url(api_url)
-    endpoint = url.replace("/media", "/playlists/")
+    endpoint = _build_endpoint(url, "/playlists/")
     auth = _get_auth()
     try:
         resp = requests.post(
@@ -111,8 +132,7 @@ def add_to_playlist(
     import requests  # type: ignore
     url = _get_api_url(api_url)
     auth = _get_auth()
-    base = url.replace("/media", "")
-    endpoint = f"{base}/{playlist_id}"
+    endpoint = _build_endpoint(url, f"/playlists/{playlist_id}")
     try:
         resp = requests.put(
             endpoint,

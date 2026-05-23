@@ -5,7 +5,7 @@ Usage
 .. code-block:: bash
 
     python -m app.main --url "https://youtu.be/XXXXXXXXXXX" --upload
-    python -m app.main --url "360 sunset drone" --no-upload
+    python -m app.main --url "360 sunset drone" --upload --title "Sunset 360"
 """
 
 from __future__ import annotations

@@ -14,9 +14,10 @@ class UnknownProjectionFallbackTests(unittest.TestCase):
 
     def _run_stage(self, projection_type, confidence=0.9, *, converted_return="/out/conv.mp4"):
         """Call the stage with a mocked conversion back-end."""
+        mock_result = {"success": True, "output_path": converted_return, "skipped": False}
         with patch(
             "detector.projection_conversion.convert_detected_projection_to_equirectangular",
-            return_value=converted_return,
+            return_value=mock_result,
         ) as mock_conv:
             result = _stage_convert_to_equirectangular(
                 video_path="/input/video.mp4",
@@ -67,10 +68,53 @@ class UnknownProjectionFallbackTests(unittest.TestCase):
         mock_conv.assert_called_once()
         self.assertIsNotNone(result)
 
-    def test_low_confidence_skips_even_for_unknown(self):
-        """Confidence below threshold must suppress conversion even after fallback."""
-        result, mock_conv = self._run_stage("unknown", confidence=0.3)
-        mock_conv.assert_not_called()
+    def test_converter_not_called_with_confidence_kwarg(self):
+        """confidence= must never be forwarded to the converter (wrong signature)."""
+        _result, mock_conv = self._run_stage("eac")
+        mock_conv.assert_called_once()
+        call_kwargs = mock_conv.call_args.kwargs
+        self.assertNotIn(
+            "confidence",
+            call_kwargs,
+            "confidence= must not be passed to convert_detected_projection_to_equirectangular",
+        )
+
+    def test_converter_returns_dict_and_path_is_extracted(self):
+        """Stage must extract output_path from dict, not return the dict itself."""
+        result, _ = self._run_stage("eac", converted_return="/out/eac_equirect.mp4")
+        self.assertIsInstance(result, str, "result must be a string path, not a dict")
+        self.assertEqual(result, "/out/eac_equirect.mp4")
+
+    def test_failed_conversion_dict_returns_none(self):
+        """When converter reports success=False, stage must return None."""
+        fail_result = {"success": False, "output_path": None, "skipped": False}
+        with patch(
+            "detector.projection_conversion.convert_detected_projection_to_equirectangular",
+            return_value=fail_result,
+        ):
+            result = _stage_convert_to_equirectangular(
+                video_path="/input/video.mp4",
+                projection_type="eac",
+                confidence=0.9,
+                output_dir="/out",
+                confidence_threshold=0.5,
+            )
+        self.assertIsNone(result)
+
+    def test_skipped_conversion_dict_returns_none(self):
+        """When converter reports skipped=True (success=False), stage must return None."""
+        skip_result = {"success": False, "output_path": None, "skipped": True}
+        with patch(
+            "detector.projection_conversion.convert_detected_projection_to_equirectangular",
+            return_value=skip_result,
+        ):
+            result = _stage_convert_to_equirectangular(
+                video_path="/input/video.mp4",
+                projection_type="eac",
+                confidence=0.9,
+                output_dir="/out",
+                confidence_threshold=0.5,
+            )
         self.assertIsNone(result)
 
 

@@ -138,12 +138,8 @@ class Settings:
         self.cms_user: Optional[str] = (
             os.getenv("CMS_USER") or os.getenv("USER") or None
         )
-        self.cms_password: Optional[str] = (
-            os.getenv("CMS_PASSWORD") or os.getenv("PASSWORD") or None
-        )
-        self.cms_token: Optional[str] = (
-            os.getenv("CMS_TOKEN") or os.getenv("TOKEN") or None
-        )
+        self.cms_password: Optional[str] = os.getenv("CMS_PASSWORD") or None
+        self.cms_token: Optional[str] = os.getenv("CMS_TOKEN") or None
 
         # ---- Detector thresholds ----
         self.min_frames_analyzed: int = _env_int("VPD_MIN_FRAMES_ANALYZED", 4)

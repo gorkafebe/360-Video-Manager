@@ -13,7 +13,6 @@ Public API
         out_path = convert_to_equirectangular(
             "path/to/video.mp4",
             result["projection_type"],
-            result["confidence"],
         )
 """
 
@@ -38,7 +37,6 @@ def analyze_video_projection(video_path: str, num_frames: int = 10, **kwargs):
 def convert_to_equirectangular(
     video_path: str,
     projection_type: str,
-    confidence: float = 1.0,
     output_dir=None,
 ):
     """Convert *video_path* to equirectangular if the projection requires it.
@@ -46,15 +44,17 @@ def convert_to_equirectangular(
     Thin wrapper over the full conversion logic in
     :func:`detector.projection_conversion.convert_detected_projection_to_equirectangular`.
 
-    Returns the path to the converted file, or *video_path* unchanged when
-    conversion is not needed.
+    Returns the path to the converted file on success, or *video_path*
+    unchanged when conversion is not needed or fails.
     """
-    return convert_detected_projection_to_equirectangular(
+    result = convert_detected_projection_to_equirectangular(
         video_path=video_path,
         projection_type=projection_type,
-        confidence=confidence,
         output_dir=output_dir,
     )
+    if result.get("success") and result.get("output_path"):
+        return result["output_path"]
+    return video_path
 
 
 __all__ = [

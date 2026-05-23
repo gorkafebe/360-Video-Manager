@@ -10,8 +10,8 @@ The following table documents the conversion strategy for each type:
 |-----------------|-----------------------|----------------------------|
 | equirectangular | skip (already target) | –                          |
 | stereo_equi     | skip (geometry is OK) | –                          |
-| eac             | convert               | e→equirect                 |
-| cubic           | convert               | c6x1→equirect              |
+| eac             | convert               | eac→equirect               |
+| cubic           | convert               | c3x2→equirect              |
 | unknown         | skip                  | –                          |
 
 v360 input format identifiers used

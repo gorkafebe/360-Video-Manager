@@ -61,6 +61,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Create a new playlist with this name and add the video to it.",
     )
     parser.add_argument(
+        "--category",
+        default=None,
+        help="Existing MediaCMS category ID for patient/session assignment.",
+    )
+    parser.add_argument(
+        "--new-category",
+        metavar="NAME",
+        default=None,
+        help="Create a new category with this name and assign it to the upload.",
+    )
+    parser.add_argument(
+        "--tags",
+        default="",
+        help="Comma-separated personalized tags (e.g. anxiety,breathing,focus).",
+    )
+    parser.add_argument(
         "--upload",
         action="store_true",
         help="Upload the final asset to MediaCMS.",
@@ -128,8 +144,16 @@ def run_cli(argv: list[str] | None = None) -> int:
         upload_description=args.description,
         upload_playlist=args.playlist,
         upload_new_playlist=args.new_playlist,
+        upload_category=args.category,
+        upload_tags=[t.strip() for t in (args.tags or "").split(",") if t.strip()],
         save_manifest=not args.no_manifest,
     )
+
+    if args.upload and args.new_category and not options.upload_category:
+        from core.uploader import create_category
+        created = create_category(args.new_category.strip())
+        if created:
+            options.upload_category = created
 
     result = process_video_job(options)
 

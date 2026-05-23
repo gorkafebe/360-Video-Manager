@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
+from unittest.mock import MagicMock, mock_open, patch
 
-from core.uploader import _build_endpoint
+from core.uploader import _build_endpoint, upload_video_asset, get_categories
 
 
 class BuildEndpointTests(unittest.TestCase):
@@ -49,6 +51,135 @@ class BuildEndpointTests(unittest.TestCase):
         result = _build_endpoint("https://cms.example.com/api/v1/media", "/playlists")
         self.assertTrue(result.endswith("/playlists"))
         self.assertFalse(result.endswith("/playlists/"))
+
+    def test_get_categories_endpoint(self):
+        """get_categories uses /categories (no trailing slash) for GET."""
+        result = _build_endpoint("https://cms.example.com/api/v1/media", "/categories")
+        self.assertTrue(result.endswith("/categories"))
+        self.assertFalse(result.endswith("/categories/"))
+
+    def test_create_category_endpoint(self):
+        """create_category uses /categories/ (trailing slash) for POST."""
+        result = _build_endpoint("https://cms.example.com/api/v1/media", "/categories/")
+        self.assertTrue(result.endswith("/categories/"))
+
+
+class CategoriesApiTests(unittest.TestCase):
+    @patch("requests.get")
+    def test_get_categories_returns_results_list(self, mock_get):
+        mock_resp = MagicMock(status_code=200)
+        mock_resp.json.return_value = {"results": [{"id": "c1", "title": "Patient A"}]}
+        mock_get.return_value = mock_resp
+
+        categories = get_categories(api_url="https://cms.example.com/api/v1/media")
+        self.assertEqual(categories, [{"id": "c1", "title": "Patient A"}])
+
+
+class UploadMetadataTests(unittest.TestCase):
+    def setUp(self):
+        self.fake_settings = SimpleNamespace(
+            cms_api_url="https://cms.example.com/api/v1/media",
+            cms_token=None,
+            cms_user=None,
+            cms_password=None,
+        )
+
+    @patch("config.settings.get_settings")
+    @patch("requests.post")
+    @patch("os.path.exists", return_value=True)
+    def test_upload_includes_category_and_tags(
+        self,
+        _mock_exists,
+        mock_post,
+        mock_get_settings,
+    ):
+        mock_get_settings.return_value = self.fake_settings
+        mock_resp = MagicMock(status_code=201)
+        mock_resp.json.return_value = {
+            "friendly_token": "tok-123",
+            "media_url": "https://cms.example.com/media/tok-123",
+        }
+        mock_post.return_value = mock_resp
+
+        with patch("builtins.open", mock_open(read_data=b"video-bytes")):
+            result = upload_video_asset(
+                video_path="/tmp/video.mp4",
+                title="Session Upload",
+                description="desc",
+                api_url="https://cms.example.com/api/v1/media",
+                category_id="cat-1",
+                tags=["anxiety", " breathing ", ""],
+            )
+
+        self.assertTrue(result.success)
+        call_kwargs = mock_post.call_args.kwargs
+        self.assertIn("data", call_kwargs)
+        self.assertEqual(call_kwargs["data"]["category"], "cat-1")
+        self.assertEqual(call_kwargs["data"]["tags"], "anxiety,breathing")
+
+    @patch("config.settings.get_settings")
+    @patch("core.uploader.add_to_playlist")
+    @patch("core.uploader.create_playlist")
+    @patch("requests.post")
+    @patch("os.path.exists", return_value=True)
+    def test_upload_with_new_playlist_creates_then_adds(
+        self,
+        _mock_exists,
+        mock_post,
+        mock_create_playlist,
+        mock_add_to_playlist,
+        mock_get_settings,
+    ):
+        mock_get_settings.return_value = self.fake_settings
+        mock_resp = MagicMock(status_code=201)
+        mock_resp.json.return_value = {"friendly_token": "tok-999", "media_url": "https://cms/m/tok-999"}
+        mock_post.return_value = mock_resp
+        mock_create_playlist.return_value = "pl-new"
+        mock_add_to_playlist.return_value = True
+
+        with patch("builtins.open", mock_open(read_data=b"video-bytes")):
+            result = upload_video_asset(
+                video_path="/tmp/video.mp4",
+                title="T",
+                api_url="https://cms.example.com/api/v1/media",
+                new_playlist_name="Playlist X",
+            )
+
+        self.assertTrue(result.success)
+        mock_create_playlist.assert_called_once_with("Playlist X", api_url="https://cms.example.com/api/v1/media")
+        mock_add_to_playlist.assert_called_once_with("tok-999", "pl-new", api_url="https://cms.example.com/api/v1/media")
+
+    @patch("config.settings.get_settings")
+    @patch("core.uploader.add_to_playlist")
+    @patch("core.uploader.create_playlist")
+    @patch("requests.post")
+    @patch("os.path.exists", return_value=True)
+    def test_upload_with_existing_playlist_skips_new_playlist_creation(
+        self,
+        _mock_exists,
+        mock_post,
+        mock_create_playlist,
+        mock_add_to_playlist,
+        mock_get_settings,
+    ):
+        mock_get_settings.return_value = self.fake_settings
+        mock_resp = MagicMock(status_code=201)
+        mock_resp.json.return_value = {"friendly_token": "tok-321", "media_url": "https://cms/m/tok-321"}
+        mock_post.return_value = mock_resp
+        mock_add_to_playlist.return_value = True
+
+        with patch("builtins.open", mock_open(read_data=b"video-bytes")):
+            result = upload_video_asset(
+                video_path="/tmp/video.mp4",
+                title="T",
+                api_url="https://cms.example.com/api/v1/media",
+                playlist_id="pl-existing",
+                new_playlist_name="Ignored Name",
+            )
+
+        self.assertTrue(result.success)
+        mock_create_playlist.assert_not_called()
+        mock_add_to_playlist.assert_called_once_with("tok-321", "pl-existing", api_url="https://cms.example.com/api/v1/media")
 
 
 if __name__ == "__main__":

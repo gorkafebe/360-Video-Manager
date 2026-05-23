@@ -89,6 +89,10 @@ class JobOptions:
         Existing MediaCMS playlist name or ID to add the video to.
     upload_new_playlist
         When set, create a new playlist with this name.
+    upload_category
+        Existing MediaCMS category ID to assign to the uploaded video.
+    upload_tags
+        Optional personalized tags to attach to the uploaded video.
     save_manifest
         Whether to save a JSON job manifest (default: True).
     progress_callback
@@ -107,6 +111,8 @@ class JobOptions:
     upload_description: str = ""
     upload_playlist: Optional[str] = None
     upload_new_playlist: Optional[str] = None
+    upload_category: Optional[str] = None
+    upload_tags: Optional[List[str]] = None
     save_manifest: bool = True
     progress_callback: Optional[Callable] = None
 
@@ -294,6 +300,8 @@ def _stage_upload(
     description: str,
     playlist: Optional[str],
     new_playlist: Optional[str],
+    category: Optional[str],
+    tags: Optional[List[str]],
 ) -> UploadResult:
     """Upload *video_path* to MediaCMS."""
     from core.uploader import upload_video_asset
@@ -306,6 +314,8 @@ def _stage_upload(
             description=description,
             playlist_id=playlist,
             new_playlist_name=new_playlist,
+            category_id=category,
+            tags=tags,
         )
     except MediaCMSError as exc:
         logger.error("Upload failed: %s", exc)
@@ -424,6 +434,8 @@ def process_video_job(options: JobOptions) -> JobResult:
                     description=options.upload_description,
                     playlist=options.upload_playlist,
                     new_playlist=options.upload_new_playlist,
+                    category=options.upload_category,
+                    tags=options.upload_tags,
                 )
             else:
                 logger.warning("Upload requested but no valid asset path found; skipping.")

@@ -147,6 +147,7 @@ class VR360ManagerApp:
         self._res_children:      List                  = []   # all widgets in results_frame
         self._card_title_labels: List[ctk.CTkLabel]   = []   # for adaptive wraplength
         self._playlists:         List[Dict]            = []
+        self._categories:        List[Dict]            = []
         self._log_visible:  bool                  = False
         self._status_var  = tkinter.StringVar(value="Ready")
         self._download_progress_lock = threading.Lock()
@@ -159,6 +160,7 @@ class VR360ManagerApp:
 
         # Pre-load playlists from CMS
         threading.Thread(target=self._bg_load_playlists, daemon=True).start()
+        threading.Thread(target=self._bg_load_categories, daemon=True).start()
 
     # ── UI construction ───────────────────────────────────────────────────────
 
@@ -299,6 +301,29 @@ class VR360ManagerApp:
             upload_opts, text="＋ New…", width=72,
             command=self._on_new_playlist,
         ).grid(row=1, column=2, padx=(0, 12), pady=(4, 10))
+
+        ctk.CTkLabel(upload_opts, text="Patient (Category):").grid(
+            row=2, column=0, padx=(12, 6), pady=(4, 10), sticky="w")
+        self._category_var = tkinter.StringVar(value="— no category —")
+        self._category_menu = ctk.CTkOptionMenu(
+            upload_opts,
+            variable=self._category_var,
+            values=["— no category —"],
+            width=300,
+            dynamic_resizing=False,
+        )
+        self._category_menu.grid(row=2, column=1, padx=(0, 6), pady=(4, 10), sticky="w")
+        ctk.CTkButton(
+            upload_opts, text="＋ New…", width=72,
+            command=self._on_new_category,
+        ).grid(row=2, column=2, padx=(0, 12), pady=(4, 10))
+
+        ctk.CTkLabel(upload_opts, text="Tags:").grid(
+            row=3, column=0, padx=(12, 6), pady=(0, 10), sticky="w")
+        self._tags_entry = ctk.CTkEntry(
+            upload_opts, placeholder_text="tag1, tag2, tag3", height=32)
+        self._tags_entry.grid(
+            row=3, column=1, columnspan=2, padx=(0, 12), pady=(0, 10), sticky="ew")
 
         # ── Action buttons (in always-visible bottom frame) ──
         actions = ctk.CTkFrame(bottom, fg_color="transparent")
@@ -652,7 +677,7 @@ class VR360ManagerApp:
         if img:
             self.master.after(0, lambda i=img: self._detail_thumb.configure(image=i))
 
-    # ── Playlists ─────────────────────────────────────────────────────────────
+    # ── Playlists & Categories ───────────────────────────────────────────────
 
     def _bg_load_playlists(self) -> None:
         from core.uploader import get_playlists
@@ -702,6 +727,55 @@ class VR360ManagerApp:
         except Exception as exc:
             logger.warning("Could not create playlist: %s", exc)
         self._bg_load_playlists()
+
+    def _bg_load_categories(self) -> None:
+        from core.uploader import get_categories
+        try:
+            categories = get_categories()
+        except Exception as exc:
+            logger.debug("Category load failed: %s", exc)
+            categories = []
+        self.master.after(0, lambda c=categories: self._set_categories(c))
+
+    def _set_categories(self, categories: List[Dict]) -> None:
+        self._categories = categories
+        values = ["— no category —"] + [
+            str(c.get("title") or c.get("id") or f"Category {i + 1}")
+            for i, c in enumerate(categories)
+        ]
+        self._category_menu.configure(values=values)
+        self._category_var.set("— no category —")
+
+    def _get_category_id(self) -> Optional[str]:
+        chosen = self._category_var.get()
+        if chosen == "— no category —":
+            return None
+        for c in self._categories:
+            label = str(c.get("title") or c.get("id") or "")
+            if label == chosen:
+                return str(c.get("id") or "")
+        return None
+
+    def _on_new_category(self) -> None:
+        dialog = ctk.CTkInputDialog(
+            text="Enter patient/category name:",
+            title="New Category",
+        )
+        name = dialog.get_input()
+        if name and name.strip():
+            threading.Thread(
+                target=self._bg_create_category, args=(name.strip(),), daemon=True,
+            ).start()
+
+    def _bg_create_category(self, name: str) -> None:
+        from core.uploader import create_category
+        try:
+            new_id = create_category(name)
+            if new_id:
+                logger.info("Created category %r (id=%s)", name, new_id)
+        except Exception as exc:
+            logger.warning("Could not create category: %s", exc)
+        self._bg_load_categories()
 
     # ── Download & Process ────────────────────────────────────────────────────
 
@@ -787,6 +861,10 @@ class VR360ManagerApp:
 
     # ── Upload ────────────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _parse_tags(raw: str) -> List[str]:
+        return [t.strip() for t in (raw or "").split(",") if t.strip()]
+
     def _on_upload(self) -> None:
         if not self._ready_path:
             tkinter.messagebox.showwarning(
@@ -799,15 +877,30 @@ class VR360ManagerApp:
             tkinter.messagebox.showwarning("Warning", "Enter a title for the upload.")
             return
         playlist_id = self._get_playlist_id()
+        category_id = self._get_category_id()
+        if not category_id:
+            tkinter.messagebox.showwarning(
+                "Warning",
+                "Select or create a patient category before uploading.",
+            )
+            return
+        tags = self._parse_tags(self._tags_entry.get().strip())
         self._set_state(AppState.UPLOADING)
         self._progress_start_indeterminate("Uploading…")
         threading.Thread(
             target=self._bg_upload,
-            args=(self._ready_path, title, playlist_id),
+            args=(self._ready_path, title, playlist_id, category_id, tags),
             daemon=True,
         ).start()
 
-    def _bg_upload(self, path: str, title: str, playlist_id: Optional[str]) -> None:
+    def _bg_upload(
+        self,
+        path: str,
+        title: str,
+        playlist_id: Optional[str],
+        category_id: Optional[str],
+        tags: List[str],
+    ) -> None:
         from core.uploader import upload_video_asset
         try:
             result = upload_video_asset(
@@ -815,6 +908,8 @@ class VR360ManagerApp:
                 title=title,
                 description="",
                 playlist_id=playlist_id,
+                category_id=category_id,
+                tags=tags,
             )
         except (MediaCMSError, Exception) as exc:
             self.master.after(0, lambda e=str(exc): self._on_upload_error(e))

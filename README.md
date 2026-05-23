@@ -156,8 +156,9 @@ The GUI launches a CustomTkinter window. Workflow:
    download → codec normalise → detect projection → convert if needed.
    Progress and status are shown in the always-visible bottom bar.
 4. **Upload to CMS** — becomes available after a successful Download & Process.
-   Optionally assign a title, choose an existing MediaCMS playlist, or create
-   a new one before uploading.
+   Assign a title, choose or create a **patient category** (selected by the
+   psychologist), optionally add personalized tags, and choose an existing
+   MediaCMS playlist or create a new one before uploading.
 5. **Log panel** — toggled with the "Show log" button; displays structured
    pipeline log output in real time.
 
@@ -175,6 +176,12 @@ python -m app.main --cli --url "https://youtu.be/XXXXXXXXXXX" --upload
 
 # Use a search query instead of a direct URL
 python -m app.main --cli --url "360 aerial drone" --upload --title "Aerial 360"
+
+# Upload with patient category + personalized tags
+python -m app.main --cli --url "https://youtu.be/XXXXXXXXXXX" --upload --category "patient-123" --tags "anxiety,grounding"
+
+# Create a new patient category on the fly
+python -m app.main --cli --url "https://youtu.be/XXXXXXXXXXX" --upload --new-category "Patient Jane Doe"
 
 # Process a local file (skip download step)
 python -m app.main --cli --local /path/to/video.mp4
@@ -200,6 +207,9 @@ python -m app.main --cli --help
 | `--description TEXT` | `""` | Upload description. |
 | `--playlist NAME_OR_ID` | — | Existing MediaCMS playlist name or ID. |
 | `--new-playlist NAME` | — | Create a new playlist with this name and add the video. |
+| `--category ID` | — | Existing MediaCMS category ID (patient/session category). |
+| `--new-category NAME` | — | Create a new MediaCMS category and assign it to the upload. |
+| `--tags CSV` | `""` | Comma-separated personalized tags for upload metadata. |
 | `--upload` | off | Upload the final asset to MediaCMS. |
 | `--no-convert` | off | Skip equirectangular conversion. |
 | `--confidence-threshold FLOAT` | `0.5` | Minimum detection confidence to trigger conversion. |

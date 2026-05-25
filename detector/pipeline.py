@@ -48,7 +48,7 @@ CONFIG = load_config()
 
 def _resolve_motion_feature_flags(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     cfg = config or CONFIG
-    profile = str(cfg.get("motion_rollout_profile", "baseline")).strip().lower()
+    profile = str(cfg.get("motion_rollout_profile", "high_accuracy")).strip().lower()
     enable_refinement = bool(cfg.get("flow_enable_refinement", False))
     enable_fb_check = bool(cfg.get("flow_enable_fb_check", False))
     enable_geometry_evidence = bool(cfg.get("enable_geometry_evidence", False))
@@ -294,7 +294,8 @@ def _classify_non_equirectangular(
     forward_backward_threshold: float = 1.5,
     enable_geometry_evidence: bool = False,
     geometry_evidence_weight: float = 0.20,
-    confidence_rollout_profile: str = "baseline",
+    confidence_rollout_profile: str = "high_accuracy",
+    seam_support_ratio: float = 1.0,
 ) -> Dict[str, Any]:
     def _build_pair_plan(seq_len: int, prioritize_long: bool = False) -> List[tuple[int, int, int]]:
         if seq_len < 2:
@@ -333,13 +334,15 @@ def _classify_non_equirectangular(
         motion_strength = float(pair_result.get("pair_motion_strength", 0.0))
         geometry_quality = float(pair_result.get("pair_geometry_quality", 0.0))
         motion_component = min(1.0, motion_strength / 0.10)
+        gap = max(1, int(pair_result.get("pair_gap", 1)))
+        gap_boost = min(1.35, 1.0 + (0.08 * (gap - 1)))
         weight = (
             0.30
             + (0.35 * motion_component)
             + (0.20 * min(1.0, layout_margin))
             + (0.15 * np.clip(geometry_quality, 0.0, 1.0))
         )
-        return max(0.1, weight)
+        return max(0.1, weight * gap_boost)
 
     def _is_pair_low_motion(pair_result: Dict[str, Any]) -> bool:
         pair_mag = float(pair_result.get("pair_mean_magnitude", 0.0))
@@ -360,8 +363,13 @@ def _classify_non_equirectangular(
     valid_pair_active_ratios: List[float] = []
     pair_geometry_qualities: List[float] = []
     pair_layout_margins: List[float] = []
+    pair_decisions: List[bool] = []
     low_motion_pairs = 0
     pair_gaps_used: List[int] = []
+    long_gap_weighted_eac = 0.0
+    long_gap_weighted_cubic = 0.0
+    geometry_vote_eac = 0.0
+    geometry_vote_cubic = 0.0
 
     for seq_idx, secuencia in enumerate(secuencias):
         seq_label = f"seq_{seq_idx:03d}"
@@ -518,6 +526,7 @@ def _classify_non_equirectangular(
 
             pares_validos += 1
             pair_gaps_used.append(gap)
+            pair_result["pair_gap"] = gap
             if bool(pair_result.get("decision")):
                 pares_eac += 1
             else:
@@ -527,6 +536,12 @@ def _classify_non_equirectangular(
                 weighted_eac += weight
             else:
                 weighted_cubic += weight
+            if gap >= 2:
+                if bool(pair_result.get("decision")):
+                    long_gap_weighted_eac += weight
+                else:
+                    long_gap_weighted_cubic += weight
+            pair_decisions.append(bool(pair_result.get("decision")))
 
             pair_mag = float(pair_result.get("pair_mean_magnitude", 0.0))
             pair_active = float(pair_result.get("pair_mean_active_ratio", 0.0))
@@ -536,7 +551,14 @@ def _classify_non_equirectangular(
             score_eac_fused = pair_result.get("score_eac_fused")
             score_cubic_fused = pair_result.get("score_cubic_fused")
             if score_eac_fused is not None and score_cubic_fused is not None:
-                pair_layout_margins.append(abs(float(score_eac_fused) - float(score_cubic_fused)))
+                fused_margin = abs(float(score_eac_fused) - float(score_cubic_fused))
+                pair_layout_margins.append(fused_margin)
+                geometry_quality = float(pair_result.get("pair_geometry_quality", 0.0))
+                geometry_vote = geometry_quality * min(1.0, fused_margin * 2.5)
+                if float(score_eac_fused) >= float(score_cubic_fused):
+                    geometry_vote_eac += geometry_vote
+                else:
+                    geometry_vote_cubic += geometry_vote
             if _is_pair_low_motion(pair_result):
                 low_motion_pairs += 1
             if pair_result.get("score_eac") is not None:
@@ -557,6 +579,9 @@ def _classify_non_equirectangular(
     weighted_total = weighted_eac + weighted_cubic
     ratio_eac = (weighted_eac / weighted_total) if weighted_total > 0 else 0.0
     ratio_cubic = (weighted_cubic / weighted_total) if weighted_total > 0 else 0.0
+    long_gap_total = long_gap_weighted_eac + long_gap_weighted_cubic
+    long_gap_ratio_eac = (long_gap_weighted_eac / long_gap_total) if long_gap_total > 0 else 0.0
+    long_gap_ratio_cubic = (long_gap_weighted_cubic / long_gap_total) if long_gap_total > 0 else 0.0
     mean_pair_magnitude = float(np.mean(valid_pair_motion_magnitudes)) if valid_pair_motion_magnitudes else 0.0
     mean_pair_active_ratio = float(np.mean(valid_pair_active_ratios)) if valid_pair_active_ratios else 0.0
     low_motion_ratio = (low_motion_pairs / pares_validos) if pares_validos > 0 else 0.0
@@ -610,6 +635,24 @@ def _classify_non_equirectangular(
             sorted(set(pair_gaps_used)),
         )
 
+    def _decision_persistence(decisions: List[bool], target: bool) -> float:
+        if not decisions:
+            return 0.0
+        best = 0
+        current = 0
+        for decision in decisions:
+            if bool(decision) == bool(target):
+                current += 1
+                best = max(best, current)
+            else:
+                current = 0
+        return float(best / max(1, len(decisions)))
+
+    persistence_eac = _decision_persistence(pair_decisions, True)
+    persistence_cubic = _decision_persistence(pair_decisions, False)
+    seam_confidence = float(np.clip((float(seam_support_ratio) - 0.45) / 0.45, 0.0, 1.0))
+    geometry_vote_total = geometry_vote_eac + geometry_vote_cubic
+
     if ratio_eac >= effective_dominant_ratio_threshold:
         clasificacion = "eac"
     elif ratio_cubic >= effective_dominant_ratio_threshold:
@@ -617,7 +660,16 @@ def _classify_non_equirectangular(
     else:
         ratio_gap = abs(ratio_eac - ratio_cubic)
         if ratio_gap <= float(ambiguity_gap):
-            clasificacion = "unknown"
+            geometry_gap = abs(geometry_vote_eac - geometry_vote_cubic)
+            long_gap_ratio_gap = abs(long_gap_ratio_eac - long_gap_ratio_cubic)
+            if geometry_vote_total >= 0.20 and geometry_gap >= 0.10:
+                clasificacion = "eac" if geometry_vote_eac >= geometry_vote_cubic else "cubic"
+            elif long_gap_total >= 0.20 and long_gap_ratio_gap >= 0.12:
+                clasificacion = "eac" if long_gap_ratio_eac >= long_gap_ratio_cubic else "cubic"
+            elif max(persistence_eac, persistence_cubic) >= 0.60:
+                clasificacion = "eac" if persistence_eac >= persistence_cubic else "cubic"
+            else:
+                clasificacion = "unknown"
         else:
             clasificacion = "eac" if ratio_eac > ratio_cubic else "cubic"
 
@@ -628,23 +680,26 @@ def _classify_non_equirectangular(
     profile_key = str(confidence_rollout_profile or "baseline").strip().lower()
     if profile_key == "high_accuracy":
         motion_confidence = (
-            0.40 * base_confidence
+            0.32 * base_confidence
             + 0.20 * layout_confidence
             + 0.15 * motion_signal_confidence
-            + 0.25 * geometry_confidence
+            + 0.23 * geometry_confidence
+            + 0.10 * seam_confidence
         )
     elif profile_key == "robust":
         motion_confidence = (
-            0.45 * base_confidence
+            0.40 * base_confidence
             + 0.25 * layout_confidence
             + 0.20 * motion_signal_confidence
             + 0.10 * geometry_confidence
+            + 0.05 * seam_confidence
         )
     else:
         motion_confidence = (
-            0.65 * base_confidence
+            0.60 * base_confidence
             + 0.20 * layout_confidence
             + 0.15 * motion_signal_confidence
+            + 0.05 * seam_confidence
         )
     score_margin = abs(ratio_eac - ratio_cubic)
 
@@ -669,7 +724,23 @@ def _classify_non_equirectangular(
 
     reliable = len([r for r in reliability_reasons if not r.startswith("low_motion_detected:")]) == 0
     if not reliable and clasificacion != "unknown":
-        clasificacion = "unknown"
+        contradictory_evidence = bool(
+            score_margin <= max(0.03, float(ambiguity_gap) * 0.50)
+            and abs(long_gap_ratio_eac - long_gap_ratio_cubic) < 0.10
+            and abs(geometry_vote_eac - geometry_vote_cubic) < 0.08
+            and max(persistence_eac, persistence_cubic) < 0.58
+        )
+        strong_consistency = bool(
+            max(persistence_eac, persistence_cubic) >= 0.65
+            or abs(long_gap_ratio_eac - long_gap_ratio_cubic) >= 0.18
+            or abs(geometry_vote_eac - geometry_vote_cubic) >= 0.14
+            or seam_confidence >= 0.80
+        )
+        if contradictory_evidence or not strong_consistency:
+            clasificacion = "unknown"
+        else:
+            reliable = True
+            reliability_reasons.append("forced_by_consistent_evidence")
 
     logger.info(f"[EVAL] pairs={pares_validos} eac={pares_eac} cubic={pares_cubic}")
     logger.info(
@@ -701,6 +772,11 @@ def _classify_non_equirectangular(
         "motion_pair_gaps_used": sorted(set(pair_gaps_used)),
         "weighted_ratio_eac": ratio_eac,
         "pair_geometry_mean_quality": geometry_confidence,
+        "pair_geometry_vote_gap": abs(geometry_vote_eac - geometry_vote_cubic),
+        "pair_long_gap_ratio_gap": abs(long_gap_ratio_eac - long_gap_ratio_cubic),
+        "pair_persistence_eac": persistence_eac,
+        "pair_persistence_cubic": persistence_cubic,
+        "seam_confidence": seam_confidence,
     }
 
 
@@ -726,7 +802,7 @@ def run_detection_pipeline(
     forward_backward_threshold: float = 1.5,
     enable_geometry_evidence: bool = False,
     geometry_evidence_weight: float = 0.20,
-    confidence_rollout_profile: str = "baseline",
+    confidence_rollout_profile: str = "high_accuracy",
 ) -> Dict[str, Any]:
     try:
         logger.info(f"Detectando tipo de proyección para: {video_path}")
@@ -1096,6 +1172,7 @@ def run_detection_pipeline(
                             enable_geometry_evidence=enable_geometry_evidence,
                             geometry_evidence_weight=geometry_evidence_weight,
                             confidence_rollout_profile=confidence_rollout_profile,
+                            seam_support_ratio=ratio,
                         )
                         projection_type = motion_result["classification"]
                         motion_reliable = bool(motion_result["reliable"])

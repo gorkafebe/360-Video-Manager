@@ -203,6 +203,13 @@ class DetectionRetryTests(unittest.TestCase):
 
 
 class MotionFeatureFlagResolutionTests(unittest.TestCase):
+    def test_default_profile_is_high_accuracy(self):
+        flags = _resolve_motion_feature_flags({})
+        self.assertEqual(flags["profile"], "high_accuracy")
+        self.assertTrue(flags["enable_refinement"])
+        self.assertTrue(flags["enable_fb_check"])
+        self.assertTrue(flags["enable_geometry_evidence"])
+
     def test_baseline_profile_keeps_safe_defaults(self):
         flags = _resolve_motion_feature_flags(
             {

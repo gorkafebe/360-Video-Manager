@@ -220,21 +220,17 @@ def _stage_detect_projection(
     debug_dir: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run the robust detector pipeline on *video_path*."""
-    from detector.pipeline import run_detection_pipeline, CONFIG
+    from detector.pipeline import run_detection_with_retries
 
     logger.info("Running projection detection on: %s", video_path)
 
-    debug_context: Optional[Dict[str, str]] = None
-    if debug_dir:
-        from detector.debug_utils import create_run_debug_dir
-        debug_context = create_run_debug_dir(video_path, debug_dir)
-        logger.info("Debug output directory: %s", debug_context.get("run_dir"))
-
-    result = run_detection_pipeline(
+    result, debug_context = run_detection_with_retries(
         video_path,
         num_frames=num_frames,
-        debug_context=debug_context,
+        debug_base_dir=debug_dir,
     )
+    if debug_context:
+        logger.info("Debug output directory: %s", debug_context.get("run_dir"))
     logger.info(
         "Detection complete: projection=%s confidence=%.1f%%",
         result.get("projection_type", "unknown"),

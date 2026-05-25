@@ -24,13 +24,13 @@ VPD_LINE_MAX_SLOPE      Maximum allowed line slope for detection (default: 0.05)
 VPD_LINE_MIN_COVERAGE_RATIO  Minimum line coverage fraction (default: 0.20).
 VPD_STEREO_HIST_THRESHOLD   Histogram correlation threshold for stereo (default: 0.92).
 VPD_SAVE_STEREO_HALVES  Whether to save stereo half-frame debug images (default: true).
-VPD_FLOW_ALGORITHM      Optical-flow algorithm (default: farneback).
+VPD_FLOW_ALGORITHM      Optical-flow algorithm (default: deepflow).
 VPD_FLOW_ENABLE_REFINEMENT  Enable optional variational-refinement pass (default: false).
 VPD_FLOW_ENABLE_FB_CHECK    Enable forward-backward consistency filtering (default: false).
 VPD_FLOW_FB_THRESHOLD       Forward-backward error threshold in pixels (default: 1.5).
 VPD_ENABLE_GEOMETRY_EVIDENCE  Enable geometry quality evidence fusion (default: false).
 VPD_GEOMETRY_EVIDENCE_WEIGHT  Geometry evidence blend weight (default: 0.2).
-VPD_MOTION_ROLLOUT_PROFILE  Motion feature profile: baseline|robust|high_accuracy (default: baseline).
+VPD_MOTION_ROLLOUT_PROFILE  Motion feature profile: baseline|robust|high_accuracy (default: high_accuracy).
 DOWNLOADS_DIR           Override default download directory.
 """
 
@@ -161,13 +161,13 @@ class Settings:
             "VPD_STEREO_HIST_THRESHOLD", 0.92
         )
         self.save_stereo_halves: bool = _env_bool("VPD_SAVE_STEREO_HALVES", True)
-        self.flow_algorithm: str = _env_str("VPD_FLOW_ALGORITHM", "farneback")
+        self.flow_algorithm: str = _env_str("VPD_FLOW_ALGORITHM", "deepflow")
         self.flow_enable_refinement: bool = _env_bool("VPD_FLOW_ENABLE_REFINEMENT", False)
         self.flow_enable_fb_check: bool = _env_bool("VPD_FLOW_ENABLE_FB_CHECK", False)
         self.flow_fb_threshold: float = _env_float("VPD_FLOW_FB_THRESHOLD", 1.5)
         self.enable_geometry_evidence: bool = _env_bool("VPD_ENABLE_GEOMETRY_EVIDENCE", False)
         self.geometry_evidence_weight: float = _env_float("VPD_GEOMETRY_EVIDENCE_WEIGHT", 0.20)
-        self.motion_rollout_profile: str = _env_str("VPD_MOTION_ROLLOUT_PROFILE", "baseline")
+        self.motion_rollout_profile: str = _env_str("VPD_MOTION_ROLLOUT_PROFILE", "high_accuracy")
 
         # Expose detector-compatible dict view (for backward compatibility with
         # detector modules that consume the CONFIG dict from pipeline.py).

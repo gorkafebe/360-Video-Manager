@@ -297,13 +297,13 @@ root. Defaults shown are the values used when a variable is not set.
 | `VPD_LINE_MIN_COVERAGE_RATIO` | `0.20` | Minimum seam coverage fraction across frame width |
 | `VPD_STEREO_HIST_THRESHOLD` | `0.92` | Histogram correlation threshold for stereo detection |
 | `VPD_SAVE_STEREO_HALVES` | `true` | Save left/right half-frame debug images |
-| `VPD_FLOW_ALGORITHM` | `farneback` | Optical-flow algorithm (`farneback`, `dis`, and contrib options when available) |
+| `VPD_FLOW_ALGORITHM` | `deepflow` | Optical-flow algorithm (`farneback`, `dis`, and contrib options when available) |
 | `VPD_FLOW_ENABLE_REFINEMENT` | `false` | Enable optional variational refinement on top of base optical flow |
 | `VPD_FLOW_ENABLE_FB_CHECK` | `false` | Enable forward-backward optical-flow consistency filtering |
 | `VPD_FLOW_FB_THRESHOLD` | `1.5` | Forward-backward consistency threshold in pixels |
 | `VPD_ENABLE_GEOMETRY_EVIDENCE` | `false` | Enable geometry-evidence fusion from robust homography fitting |
 | `VPD_GEOMETRY_EVIDENCE_WEIGHT` | `0.20` | Blend weight for geometry evidence in EAC-vs-cubic scoring |
-| `VPD_MOTION_ROLLOUT_PROFILE` | `baseline` | Motion profile: `baseline`, `robust`, `high_accuracy` |
+| `VPD_MOTION_ROLLOUT_PROFILE` | `high_accuracy` | Motion profile: `baseline`, `robust`, `high_accuracy` |
 
 ---
 

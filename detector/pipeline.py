@@ -1,6 +1,6 @@
 import logging
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 import cv2
 import numpy as np
@@ -99,6 +99,16 @@ def _analyze_motion_pair_detailed(
             else:
                 invalid_regions += 1
 
+        pair_mean_magnitude = 0.0
+        pair_mean_active_ratio = 0.0
+        pair_motion_strength = 0.0
+        if region_info:
+            magnitudes = [float(v.get("magnitude", 0.0)) for v in region_info.values() if bool(v.get("valid"))]
+            active_ratios = [float(v.get("active_ratio", 0.0)) for v in region_info.values()]
+            pair_mean_magnitude = float(np.mean(magnitudes)) if magnitudes else 0.0
+            pair_mean_active_ratio = float(np.mean(active_ratios)) if active_ratios else 0.0
+            pair_motion_strength = pair_mean_magnitude * pair_mean_active_ratio
+
         affine_angles = compute_region_affine_angles(frame1, frame2, region_bounds)
         for row, col, _y0, _y1, _x0, _x1 in region_bounds:
             affine_angle = affine_angles.get((row, col))
@@ -131,6 +141,9 @@ def _analyze_motion_pair_detailed(
             "score_cubic": cubic_eval["score"],
             "valid_regions": valid_regions,
             "invalid_regions": invalid_regions,
+            "pair_mean_magnitude": pair_mean_magnitude,
+            "pair_mean_active_ratio": pair_mean_active_ratio,
+            "pair_motion_strength": pair_motion_strength,
             "status": status,
             "reason": reason,
             "flow": flow,
@@ -145,6 +158,9 @@ def _analyze_motion_pair_detailed(
             "score_cubic": None,
             "valid_regions": 0,
             "invalid_regions": 0,
+            "pair_mean_magnitude": 0.0,
+            "pair_mean_active_ratio": 0.0,
+            "pair_motion_strength": 0.0,
             "status": "discarded",
             "reason": "exception",
             "flow": None,
@@ -167,6 +183,50 @@ def _classify_non_equirectangular(
     ambiguity_gap: float = 0.10,
     flow_algorithm: str = "farneback",
 ) -> Dict[str, Any]:
+    def _build_pair_plan(seq_len: int, prioritize_long: bool = False) -> List[tuple[int, int, int]]:
+        if seq_len < 2:
+            return []
+        max_gap = max(1, seq_len - 1)
+        candidate_gaps = [1, min(2, max_gap), min(3, max_gap), max_gap]
+        dedup_gaps: List[int] = []
+        seen_gaps: Set[int] = set()
+        for gap in candidate_gaps:
+            if gap not in seen_gaps:
+                dedup_gaps.append(gap)
+                seen_gaps.add(gap)
+        if prioritize_long:
+            dedup_gaps = sorted(dedup_gaps, reverse=True)
+        else:
+            dedup_gaps = sorted(dedup_gaps)
+
+        pairs: List[tuple[int, int, int]] = []
+        seen_pairs: Set[tuple[int, int]] = set()
+        for gap in dedup_gaps:
+            for i in range(0, seq_len - gap):
+                j = i + gap
+                key = (i, j)
+                if key in seen_pairs:
+                    continue
+                seen_pairs.add(key)
+                pairs.append((i, j, gap))
+        return pairs
+
+    def _pair_weight(pair_result: Dict[str, Any]) -> float:
+        score_eac = pair_result.get("score_eac")
+        score_cubic = pair_result.get("score_cubic")
+        layout_margin = 0.0
+        if score_eac is not None and score_cubic is not None:
+            layout_margin = abs(float(score_eac) - float(score_cubic))
+        motion_strength = float(pair_result.get("pair_motion_strength", 0.0))
+        motion_component = min(1.0, motion_strength / 0.10)
+        weight = 0.35 + (0.40 * motion_component) + (0.25 * min(1.0, layout_margin))
+        return max(0.1, weight)
+
+    def _is_pair_low_motion(pair_result: Dict[str, Any]) -> bool:
+        pair_mag = float(pair_result.get("pair_mean_magnitude", 0.0))
+        pair_active = float(pair_result.get("pair_mean_active_ratio", 0.0))
+        return pair_mag < 1.15 or pair_active < 0.05
+
     pares_totales = 0
     pares_validos = 0
     pares_eac = 0
@@ -175,26 +235,84 @@ def _classify_non_equirectangular(
     total_regiones_invalidas = 0
     eac_scores_list: List[float] = []
     cubic_scores_list: List[float] = []
+    weighted_eac = 0.0
+    weighted_cubic = 0.0
+    valid_pair_motion_magnitudes: List[float] = []
+    valid_pair_active_ratios: List[float] = []
+    low_motion_pairs = 0
+    pair_gaps_used: List[int] = []
 
     for seq_idx, secuencia in enumerate(secuencias):
         seq_label = f"seq_{seq_idx:03d}"
         if labels_secuencia and seq_idx < len(labels_secuencia):
             seq_label = labels_secuencia[seq_idx]
+        baseline_pairs = _build_pair_plan(len(secuencia), prioritize_long=False)
+        short_pairs = [p for p in baseline_pairs if p[2] == 1]
+        extended_pairs = [p for p in baseline_pairs if p[2] != 1]
 
-        for i in range(len(secuencia) - 1):
+        prelim_weighted_eac = 0.0
+        prelim_weighted_cubic = 0.0
+        short_motion_signals: List[float] = []
+        short_pair_cache: Dict[tuple[int, int], Dict[str, Any]] = {}
+
+        candidate_pairs: List[tuple[int, int, int]] = []
+        if short_pairs:
+            candidate_pairs.extend(short_pairs)
+            for i, j, _gap in short_pairs:
+                quick_pair = _analyze_motion_pair_detailed(
+                    secuencia[i],
+                    secuencia[j],
+                    gaussian_kernel_size=gaussian_kernel_size,
+                    gaussian_sigma=gaussian_sigma,
+                    min_active_ratio=min_active_ratio,
+                    min_layout_score_margin=min_layout_score_margin,
+                    flow_algorithm=flow_algorithm,
+                )
+                short_pair_cache[(i, j)] = quick_pair
+                if quick_pair.get("decision") is None:
+                    continue
+                short_motion_signals.append(float(quick_pair.get("pair_motion_strength", 0.0)))
+                w = _pair_weight(quick_pair)
+                if bool(quick_pair.get("decision")):
+                    prelim_weighted_eac += w
+                else:
+                    prelim_weighted_cubic += w
+
+        prelim_total_weight = prelim_weighted_eac + prelim_weighted_cubic
+        prelim_confidence = (
+            abs(prelim_weighted_eac - prelim_weighted_cubic) / prelim_total_weight
+            if prelim_total_weight > 0
+            else 0.0
+        )
+        prelim_mean_signal = float(np.mean(short_motion_signals)) if short_motion_signals else 0.0
+        prioritize_long = prelim_confidence < 0.35 or prelim_mean_signal < 0.035
+        if prioritize_long:
+            extended_pairs = sorted(extended_pairs, key=lambda pair: pair[2], reverse=True)
+        candidate_pairs.extend(extended_pairs)
+
+        seen_candidates: Set[tuple[int, int]] = set()
+        for i, j, gap in candidate_pairs:
+            if (i, j) in seen_candidates:
+                continue
+            seen_candidates.add((i, j))
             pares_totales += 1
-            pair_label = f"{seq_label}_pair_{i+1:02d}_{i+2:02d}"
-            logger.info(f"[PAIR][{pair_label}] START (secondary_frames={i+1:02d}->{i+2:02d})")
-
-            pair_result = _analyze_motion_pair_detailed(
-                secuencia[i],
-                secuencia[i + 1],
-                gaussian_kernel_size=gaussian_kernel_size,
-                gaussian_sigma=gaussian_sigma,
-                min_active_ratio=min_active_ratio,
-                min_layout_score_margin=min_layout_score_margin,
-                flow_algorithm=flow_algorithm,
+            pair_label = f"{seq_label}_pair_{i+1:02d}_{j+1:02d}_gap{gap:02d}"
+            logger.info(
+                f"[PAIR][{pair_label}] START "
+                f"(secondary_frames={i+1:02d}->{j+1:02d}, gap={gap})"
             )
+
+            pair_result = short_pair_cache.get((i, j))
+            if pair_result is None:
+                pair_result = _analyze_motion_pair_detailed(
+                    secuencia[i],
+                    secuencia[j],
+                    gaussian_kernel_size=gaussian_kernel_size,
+                    gaussian_sigma=gaussian_sigma,
+                    min_active_ratio=min_active_ratio,
+                    min_layout_score_margin=min_layout_score_margin,
+                    flow_algorithm=flow_algorithm,
+                )
 
             total_regiones_validas += int(pair_result.get("valid_regions", 0))
             total_regiones_invalidas += int(pair_result.get("invalid_regions", 0))
@@ -268,10 +386,23 @@ def _classify_non_equirectangular(
                 continue
 
             pares_validos += 1
+            pair_gaps_used.append(gap)
             if bool(pair_result.get("decision")):
                 pares_eac += 1
             else:
                 pares_cubic += 1
+            weight = _pair_weight(pair_result)
+            if bool(pair_result.get("decision")):
+                weighted_eac += weight
+            else:
+                weighted_cubic += weight
+
+            pair_mag = float(pair_result.get("pair_mean_magnitude", 0.0))
+            pair_active = float(pair_result.get("pair_mean_active_ratio", 0.0))
+            valid_pair_motion_magnitudes.append(pair_mag)
+            valid_pair_active_ratios.append(pair_active)
+            if _is_pair_low_motion(pair_result):
+                low_motion_pairs += 1
             if pair_result.get("score_eac") is not None:
                 eac_scores_list.append(float(pair_result["score_eac"]))
             if pair_result.get("score_cubic") is not None:
@@ -280,12 +411,27 @@ def _classify_non_equirectangular(
                 f"[PAIR][{pair_label}] -> USED "
                 f"(valid_regions={pair_result.get('valid_regions', 0)}, "
                 f"invalid_regions={pair_result.get('invalid_regions', 0)}, "
-                f"decision={'EAC' if pair_result.get('decision') else 'CUBIC'})"
+                f"decision={'EAC' if pair_result.get('decision') else 'CUBIC'}, "
+                f"mean_mag={pair_mag:.3f}, active_ratio={pair_active:.3f}, weight={weight:.3f})"
             )
 
     avg_eac_score = float(np.mean(eac_scores_list)) if eac_scores_list else None
     avg_cubic_score = float(np.mean(cubic_scores_list)) if cubic_scores_list else None
     score_margin = 0.0
+    weighted_total = weighted_eac + weighted_cubic
+    ratio_eac = (weighted_eac / weighted_total) if weighted_total > 0 else 0.0
+    ratio_cubic = (weighted_cubic / weighted_total) if weighted_total > 0 else 0.0
+    mean_pair_magnitude = float(np.mean(valid_pair_motion_magnitudes)) if valid_pair_motion_magnitudes else 0.0
+    mean_pair_active_ratio = float(np.mean(valid_pair_active_ratios)) if valid_pair_active_ratios else 0.0
+    low_motion_ratio = (low_motion_pairs / pares_validos) if pares_validos > 0 else 0.0
+    low_motion_detected = bool(
+        pares_validos > 0
+        and (
+            low_motion_ratio >= 0.60
+            or mean_pair_active_ratio < 0.055
+            or mean_pair_magnitude < 1.15
+        )
+    )
 
     if pares_validos == 0:
         log_discard("Análisis de movimiento: sin pares válidos. Clasificación conservadora => UNKNOWN.")
@@ -304,14 +450,32 @@ def _classify_non_equirectangular(
             "motion_confidence": 0.0,
             "reliable": False,
             "reliability_reason": "no_valid_pairs",
+            "motion_low_detected": False,
+            "motion_low_ratio": 0.0,
+            "motion_mean_pair_magnitude": 0.0,
+            "motion_mean_pair_active_ratio": 0.0,
+            "motion_pair_gaps_used": [],
+            "weighted_ratio_eac": 0.0,
         }
 
-    ratio_eac = pares_eac / pares_validos
-    ratio_cubic = pares_cubic / pares_validos
+    effective_min_valid_pairs = int(min_valid_pairs)
+    effective_min_motion_confidence = float(min_motion_confidence)
+    effective_dominant_ratio_threshold = float(dominant_ratio_threshold)
+    if low_motion_detected:
+        effective_min_valid_pairs = max(2, int(min_valid_pairs) - 1)
+        effective_min_motion_confidence = max(0.10, float(min_motion_confidence) * 0.60)
+        effective_dominant_ratio_threshold = max(0.65, float(dominant_ratio_threshold) - 0.10)
+        logger.info(
+            "[LOW-MOTION] active (ratio=%.0f%% mean_mag=%.3f mean_active=%.3f gaps=%s)",
+            low_motion_ratio * 100.0,
+            mean_pair_magnitude,
+            mean_pair_active_ratio,
+            sorted(set(pair_gaps_used)),
+        )
 
-    if ratio_eac >= float(dominant_ratio_threshold):
+    if ratio_eac >= effective_dominant_ratio_threshold:
         clasificacion = "eac"
-    elif ratio_cubic >= float(dominant_ratio_threshold):
+    elif ratio_cubic >= effective_dominant_ratio_threshold:
         clasificacion = "cubic"
     else:
         ratio_gap = abs(ratio_eac - ratio_cubic)
@@ -324,17 +488,25 @@ def _classify_non_equirectangular(
     score_margin = abs(ratio_eac - ratio_cubic)
 
     reliability_reasons: List[str] = []
-    if pares_validos < int(min_valid_pairs):
-        reliability_reasons.append(f"few_valid_pairs:{pares_validos}<{min_valid_pairs}")
-    if motion_confidence < float(min_motion_confidence):
-        reliability_reasons.append(f"low_motion_confidence:{motion_confidence:.2f}<{min_motion_confidence:.2f}")
+    if pares_validos < effective_min_valid_pairs:
+        reliability_reasons.append(f"few_valid_pairs:{pares_validos}<{effective_min_valid_pairs}")
+    if motion_confidence < effective_min_motion_confidence:
+        reliability_reasons.append(
+            f"low_motion_confidence:{motion_confidence:.2f}<{effective_min_motion_confidence:.2f}"
+        )
     if score_margin < float(min_layout_score_margin):
         reliability_reasons.append(f"low_layout_margin:{score_margin:.3f}<{min_layout_score_margin:.3f}")
     dominant_ratio = max(ratio_eac, ratio_cubic)
-    if dominant_ratio < float(dominant_ratio_threshold):
-        reliability_reasons.append(f"weak_dominance:{dominant_ratio:.2f}<{float(dominant_ratio_threshold):.2f}")
+    if dominant_ratio < effective_dominant_ratio_threshold:
+        reliability_reasons.append(
+            f"weak_dominance:{dominant_ratio:.2f}<{effective_dominant_ratio_threshold:.2f}"
+        )
+    if low_motion_detected:
+        reliability_reasons.append(
+            f"low_motion_detected:ratio={low_motion_ratio:.2f},mag={mean_pair_magnitude:.3f},active={mean_pair_active_ratio:.3f}"
+        )
 
-    reliable = len(reliability_reasons) == 0
+    reliable = len([r for r in reliability_reasons if not r.startswith("low_motion_detected:")]) == 0
     if not reliable and clasificacion != "unknown":
         clasificacion = "unknown"
 
@@ -361,6 +533,12 @@ def _classify_non_equirectangular(
         "motion_confidence": motion_confidence,
         "reliable": reliable,
         "reliability_reason": ";".join(reliability_reasons) if reliability_reasons else "",
+        "motion_low_detected": low_motion_detected,
+        "motion_low_ratio": low_motion_ratio,
+        "motion_mean_pair_magnitude": mean_pair_magnitude,
+        "motion_mean_pair_active_ratio": mean_pair_active_ratio,
+        "motion_pair_gaps_used": sorted(set(pair_gaps_used)),
+        "weighted_ratio_eac": ratio_eac,
     }
 
 
@@ -615,6 +793,11 @@ def run_detection_pipeline(
         motion_score_margin = 0.0
         motion_regions_valid = 0
         motion_regions_invalid = 0
+        motion_low_detected = False
+        motion_low_ratio = 0.0
+        motion_mean_pair_magnitude = 0.0
+        motion_mean_pair_active_ratio = 0.0
+        motion_pair_gaps_used: List[int] = []
         stereo_avg_similarity = 0.0
 
         if frames_analyzed > 0:
@@ -751,6 +934,19 @@ def run_detection_pipeline(
                         motion_score_margin = float(motion_result.get("score_margin", 0.0))
                         motion_regions_valid = int(motion_result.get("total_regiones_validas", 0))
                         motion_regions_invalid = int(motion_result.get("total_regiones_invalidas", 0))
+                        motion_low_detected = bool(motion_result.get("motion_low_detected", False))
+                        motion_low_ratio = float(motion_result.get("motion_low_ratio", 0.0))
+                        motion_mean_pair_magnitude = float(motion_result.get("motion_mean_pair_magnitude", 0.0))
+                        motion_mean_pair_active_ratio = float(motion_result.get("motion_mean_pair_active_ratio", 0.0))
+                        motion_pair_gaps_used = [int(x) for x in motion_result.get("motion_pair_gaps_used", [])]
+                        logger.info(
+                            "[MOTION] low_detected=%s low_ratio=%.0f%% mean_mag=%.3f mean_active=%.3f gaps=%s",
+                            motion_low_detected,
+                            motion_low_ratio * 100.0,
+                            motion_mean_pair_magnitude,
+                            motion_mean_pair_active_ratio,
+                            motion_pair_gaps_used,
+                        )
                     else:
                         projection_type = "unknown"
                         motion_reliable = False
@@ -815,6 +1011,11 @@ def run_detection_pipeline(
             "pairs_invalid": motion_pairs_invalid,
             "regions_valid": motion_regions_valid,
             "regions_invalid": motion_regions_invalid,
+            "motion_low_detected": motion_low_detected,
+            "motion_low_ratio": f"{motion_low_ratio:.3f}",
+            "motion_mean_pair_magnitude": f"{motion_mean_pair_magnitude:.3f}",
+            "motion_mean_pair_active_ratio": f"{motion_mean_pair_active_ratio:.3f}",
+            "motion_pair_gaps_used": ",".join(str(g) for g in motion_pair_gaps_used),
             "avg_eac_score": f"{motion_avg_eac_score:.3f}" if motion_avg_eac_score is not None else "N/A",
             "avg_cubic_score": f"{motion_avg_cubic_score:.3f}" if motion_avg_cubic_score is not None else "N/A",
             "score_margin": f"{motion_score_margin:.3f}",
@@ -837,6 +1038,11 @@ def run_detection_pipeline(
             "motion_pairs_total": motion_pairs_total,
             "motion_pairs_valid": motion_pairs_valid,
             "motion_confidence": motion_confidence,
+            "motion_low_detected": motion_low_detected,
+            "motion_low_ratio": motion_low_ratio,
+            "motion_mean_pair_magnitude": motion_mean_pair_magnitude,
+            "motion_mean_pair_active_ratio": motion_mean_pair_active_ratio,
+            "motion_pair_gaps_used": motion_pair_gaps_used,
             "stats": stats,
             "video_path": video_path,
             "equi_evidence_score": equi_agg["final_score"],
@@ -856,6 +1062,11 @@ def run_detection_pipeline(
             "motion_pairs_total": 0,
             "motion_pairs_valid": 0,
             "motion_confidence": 0.0,
+            "motion_low_detected": False,
+            "motion_low_ratio": 0.0,
+            "motion_mean_pair_magnitude": 0.0,
+            "motion_mean_pair_active_ratio": 0.0,
+            "motion_pair_gaps_used": [],
             "stats": {
                 "total_frames_extracted": 0,
                 "black_frames": 0,
@@ -921,6 +1132,7 @@ def run_detection_with_retries(
     final_detection: Dict[str, Any] = {}
     final_debug_context: Dict[str, str] = {}
     retry_plan = _build_detection_retry_plan(num_frames)
+    previous_motion_signal: Optional[float] = None
 
     for attempt_idx, attempt_plan in enumerate(retry_plan):
         attempt = attempt_idx + 1
@@ -972,18 +1184,58 @@ def run_detection_with_retries(
         final_detection = detection_result
         final_debug_context = debug_context
 
+        reliability_reason = str(detection_result.get("motion_reliability_reason", ""))
+        low_motion_cause = bool(detection_result.get("motion_low_detected")) or ("low_motion" in reliability_reason)
+        current_motion_signal = float(detection_result.get("motion_mean_pair_magnitude", 0.0)) * float(
+            detection_result.get("motion_mean_pair_active_ratio", 0.0)
+        )
+        motion_signal_gain = (
+            current_motion_signal - previous_motion_signal
+            if previous_motion_signal is not None
+            else 0.0
+        )
+        logger.info(
+            "[RETRY][attempt=%d] low_motion_cause=%s motion_signal=%.4f gain=%.4f",
+            attempt,
+            low_motion_cause,
+            current_motion_signal,
+            motion_signal_gain,
+        )
+
         if detection_result.get("motion_reliable"):
             logger.info(f"Intento {attempt}: clasificación confiable alcanzada. Fin de reintentos.")
             break
         if detection_result.get("projection_type") == "equirectangular":
             logger.info(f"Intento {attempt}: clasificación temprana EQUIRECTANGULAR alcanzada. Fin de reintentos.")
             break
+        if low_motion_cause and previous_motion_signal is not None and motion_signal_gain < 0.005:
+            logger.warning(
+                f"Intento {attempt}: señal de movimiento sin mejora relevante "
+                f"(actual={current_motion_signal:.4f}, ganancia={motion_signal_gain:.4f}). "
+                "Cierre anticipado de reintentos."
+            )
+            break
         if attempt < len(retry_plan):
+            if low_motion_cause:
+                next_plan = retry_plan[attempt_idx + 1]
+                next_plan["paso_frames_secundarios"] = max(
+                    next_plan["paso_frames_secundarios"],
+                    paso_sec + 6,
+                )
+                next_plan["num_frames"] = min(
+                    next_plan["num_frames"],
+                    max(2, current_num_frames - 2),
+                )
+                next_plan["min_frames_with_line_required"] = min(
+                    next_plan["min_frames_with_line_required"],
+                    max(1, next_plan["num_frames"] - 2),
+                )
             logger.warning(
                 f"Intento {attempt}: resultado no confiable "
-                f"(motivo={detection_result.get('motion_reliability_reason')}). "
+                f"(motivo={reliability_reason}). "
                 f"Reintentando con mayor separación temporal."
             )
+        previous_motion_signal = current_motion_signal
 
     return final_detection, final_debug_context
 

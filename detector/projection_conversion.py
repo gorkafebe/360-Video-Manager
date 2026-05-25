@@ -74,9 +74,28 @@ _AUDIO_FAILURE_SIGNALS: tuple = (
     "ambisonic",
     "unsupported channel layout",
     "channel layout",
+)
+
+_GENERIC_ENCODER_FAILURE_SIGNALS: tuple = (
     "encoder opening failed",
     "error initializing output stream",
     "error while opening encoder",
+)
+
+_AUDIO_CONTEXT_SIGNALS: tuple = (
+    " audio",
+    "audio ",
+    " audio:",
+    "aac",
+)
+
+_VIDEO_FAILURE_SIGNALS: tuple = (
+    "height not divisible by 2",
+    "width not divisible by 2",
+    "invalid too big or non positive size",
+    "error while filtering",
+    "libx264",
+    "v360",
 )
 
 # Projection types for which we skip conversion (geometry already suitable)
@@ -169,7 +188,23 @@ def _is_audio_failure(stderr: str) -> bool:
         True when stderr indicates an audio-related encoder failure.
     """
     s = stderr.lower()
-    return any(sig in s for sig in _AUDIO_FAILURE_SIGNALS)
+
+    if any(sig in s for sig in _VIDEO_FAILURE_SIGNALS):
+        return False
+
+    if "ambisonic" in s:
+        return True
+
+    if "unsupported channel layout" in s:
+        return True
+
+    if "channel layout" in s and any(sig in s for sig in _AUDIO_CONTEXT_SIGNALS):
+        return True
+
+    if any(sig in s for sig in _GENERIC_ENCODER_FAILURE_SIGNALS):
+        return any(sig in s for sig in _AUDIO_CONTEXT_SIGNALS)
+
+    return False
 
 
 def build_v360_filter_for_projection(projection_type: str) -> Optional[str]:
@@ -194,7 +229,13 @@ def build_v360_filter_for_projection(projection_type: str) -> Optional[str]:
     v360_in = _V360_INPUT_FORMAT.get(projection_type)
     if v360_in is None:
         return None
-    return f"v360={v360_in}:equirect"
+    # libx264 with yuv420p requires even width/height. Some source dimensions
+    # can produce odd outputs after v360, so pad to even dimensions without
+    # geometric distortion.
+    return (
+        f"v360={v360_in}:equirect,"
+        "pad=ceil(iw/2)*2:ceil(ih/2)*2:(ow-iw)/2:(oh-ih)/2"
+    )
 
 
 def build_ffmpeg_command_for_projection(

@@ -876,90 +876,129 @@ def run_detection_pipeline(
         }
 
 
+def _build_detection_retry_plan(num_frames: int, max_retries: int = 2) -> List[Dict[str, int]]:
+    requested_frames = max(2, int(num_frames))
+    frame_plan: List[int] = [requested_frames]
+
+    for decrement in range(2, 2 * (max_retries + 1), 2):
+        candidate = max(2, requested_frames - decrement)
+        if candidate != frame_plan[-1]:
+            frame_plan.append(candidate)
+        if len(frame_plan) >= (max_retries + 1):
+            break
+
+    secondary_plan = [5, 9, 13]
+    min_line_plan = [7, 6, 4]
+    retry_plan: List[Dict[str, int]] = []
+    for idx, frame_count in enumerate(frame_plan):
+        retry_plan.append(
+            {
+                "num_frames": frame_count,
+                "paso_frames_secundarios": secondary_plan[min(idx, len(secondary_plan) - 1)],
+                "min_frames_with_line_required": max(
+                    1,
+                    min(frame_count, min_line_plan[min(idx, len(min_line_plan) - 1)]),
+                ),
+            }
+        )
+    return retry_plan
+
+
+def run_detection_with_retries(
+    video_path: str,
+    num_frames: int = 10,
+    debug_base_dir: Optional[str] = None,
+) -> tuple[Dict[str, Any], Dict[str, str]]:
+    gaussian_kernel_size = 5
+    gaussian_sigma = 1.2
+    flow_algorithm = str(CONFIG["flow_algorithm"])
+    min_valid_pairs = 4
+    min_motion_confidence = 0.2
+    min_frames_analyzed_required = int(CONFIG["min_frames_analyzed_required"])
+    max_discard_ratio = float(CONFIG["max_discard_ratio"])
+    min_layout_score_margin = float(CONFIG["min_layout_score_margin"])
+
+    final_detection: Dict[str, Any] = {}
+    final_debug_context: Dict[str, str] = {}
+    retry_plan = _build_detection_retry_plan(num_frames)
+
+    for attempt_idx, attempt_plan in enumerate(retry_plan):
+        attempt = attempt_idx + 1
+        current_num_frames = attempt_plan["num_frames"]
+        paso_sec = attempt_plan["paso_frames_secundarios"]
+        min_lines = attempt_plan["min_frames_with_line_required"]
+
+        logger.info(
+            f"Intento {attempt}/{len(retry_plan)}: "
+            f"num_frames={current_num_frames}, paso_secundario={paso_sec}, min_lines={min_lines}"
+        )
+
+        debug_context: Dict[str, str] = {}
+        if debug_base_dir:
+            debug_context = create_run_debug_dir(video_path, debug_base_dir)
+            logger.info(f"Directorio de salida para frames principales: {debug_context['main_frames_dir']}")
+
+        frame_result = extract_main_frames(
+            video_path,
+            modo_extraccion="equiespaciados",
+            num_frames=current_num_frames,
+            output_dir=debug_context.get("main_frames_dir"),
+            guardar_frames=bool(debug_context),
+            frame_filename_prefix=debug_context.get("video_tag"),
+            save_image_fn=save_frame_debug if debug_context else None,
+            log_success_fn=log_success,
+            log_discard_fn=log_discard,
+        )
+
+        detection_result = run_detection_pipeline(
+            video_path,
+            num_frames=current_num_frames,
+            frames=frame_result.get("frames", []),
+            frames_metadata=frame_result.get("frames_metadata", []),
+            video_name=frame_result.get("video_name"),
+            debug_context=debug_context or None,
+            paso_frames_secundarios=paso_sec,
+            min_frames_with_line_required=min_lines,
+            min_valid_pairs=min_valid_pairs,
+            min_motion_confidence=min_motion_confidence,
+            min_frames_analyzed_required=min_frames_analyzed_required,
+            max_discard_ratio=max_discard_ratio,
+            min_layout_score_margin=min_layout_score_margin,
+            gaussian_kernel_size=gaussian_kernel_size,
+            gaussian_sigma=gaussian_sigma,
+            flow_algorithm=flow_algorithm,
+        )
+
+        final_detection = detection_result
+        final_debug_context = debug_context
+
+        if detection_result.get("motion_reliable"):
+            logger.info(f"Intento {attempt}: clasificación confiable alcanzada. Fin de reintentos.")
+            break
+        if detection_result.get("projection_type") == "equirectangular":
+            logger.info(f"Intento {attempt}: clasificación temprana EQUIRECTANGULAR alcanzada. Fin de reintentos.")
+            break
+        if attempt < len(retry_plan):
+            logger.warning(
+                f"Intento {attempt}: resultado no confiable "
+                f"(motivo={detection_result.get('motion_reliability_reason')}). "
+                f"Reintentando con mayor separación temporal."
+            )
+
+    return final_detection, final_debug_context
+
+
 def process_downloaded_video(video_path: str, output_dir: Optional[str] = None) -> Dict[str, Any]:
     final_video_path = video_path  # updated below when compat conversion runs
     try:
         logger.info(f"Procesando video: {video_path}")
 
         final_video_path = convert_video_codec(video_path)
-
-        max_retries = 2
-        num_frames_plan = [10, 8, 6]
-        paso_secundario_plan = [5, 9, 13]
-        min_line_plan = [7, 6, 4]
-        gaussian_kernel_size = 5
-        gaussian_sigma = 1.2
-        flow_algorithm = str(CONFIG["flow_algorithm"])
-        min_valid_pairs = 4
-        min_motion_confidence = 0.2
-        min_frames_analyzed_required = int(CONFIG["min_frames_analyzed_required"])
-        max_discard_ratio = float(CONFIG["max_discard_ratio"])
-        min_layout_score_margin = float(CONFIG["min_layout_score_margin"])
-
-        final_detection: Dict[str, Any] = {}
-        final_debug_context: Dict[str, str] = {}
-
-        for attempt_idx in range(max_retries + 1):
-            attempt = attempt_idx + 1
-            num_frames = num_frames_plan[min(attempt_idx, len(num_frames_plan) - 1)]
-            paso_sec = paso_secundario_plan[min(attempt_idx, len(paso_secundario_plan) - 1)]
-            min_lines = min_line_plan[min(attempt_idx, len(min_line_plan) - 1)]
-
-            logger.info(
-                f"Intento {attempt}/{max_retries + 1}: "
-                f"num_frames={num_frames}, paso_secundario={paso_sec}, min_lines={min_lines}"
-            )
-
-            debug_context = create_run_debug_dir(video_path, CONFIG["main_runs_dir"])
-            frames_dir = debug_context["main_frames_dir"]
-            logger.info(f"Directorio de salida para frames principales: {frames_dir}")
-
-            frame_result = extract_main_frames(
-                final_video_path,
-                modo_extraccion="equiespaciados",
-                num_frames=num_frames,
-                output_dir=frames_dir,
-                guardar_frames=True,
-                frame_filename_prefix=debug_context.get("video_tag"),
-                save_image_fn=save_frame_debug,
-                log_success_fn=log_success,
-                log_discard_fn=log_discard,
-            )
-
-            detection_result = run_detection_pipeline(
-                final_video_path,
-                num_frames=num_frames,
-                frames=frame_result.get("frames", []),
-                frames_metadata=frame_result.get("frames_metadata", []),
-                video_name=frame_result.get("video_name"),
-                debug_context=debug_context,
-                paso_frames_secundarios=paso_sec,
-                min_frames_with_line_required=min_lines,
-                min_valid_pairs=min_valid_pairs,
-                min_motion_confidence=min_motion_confidence,
-                min_frames_analyzed_required=min_frames_analyzed_required,
-                max_discard_ratio=max_discard_ratio,
-                min_layout_score_margin=min_layout_score_margin,
-                gaussian_kernel_size=gaussian_kernel_size,
-                gaussian_sigma=gaussian_sigma,
-                flow_algorithm=flow_algorithm,
-            )
-
-            final_detection = detection_result
-            final_debug_context = debug_context
-
-            if detection_result.get("motion_reliable"):
-                logger.info(f"Intento {attempt}: clasificación confiable alcanzada. Fin de reintentos.")
-                break
-            if detection_result.get("projection_type") == "equirectangular":
-                logger.info(f"Intento {attempt}: clasificación temprana EQUIRECTANGULAR alcanzada. Fin de reintentos.")
-                break
-            if attempt < (max_retries + 1):
-                logger.warning(
-                    f"Intento {attempt}: resultado no confiable "
-                    f"(motivo={detection_result.get('motion_reliability_reason')}). "
-                    f"Reintentando con mayor separación temporal."
-                )
+        final_detection, final_debug_context = run_detection_with_retries(
+            final_video_path,
+            num_frames=10,
+            debug_base_dir=CONFIG["main_runs_dir"],
+        )
 
         final_stats = final_detection.get(
             "stats",
@@ -1037,4 +1076,3 @@ def process_downloaded_video(video_path: str, output_dir: Optional[str] = None) 
                 logger.debug("[CLEANUP] Removed compat temp file: %s", final_video_path)
             except OSError as exc:
                 logger.warning("[CLEANUP] Could not remove compat temp file %s: %s", final_video_path, exc)
-

@@ -21,7 +21,7 @@ fake_numpy.__getattr__ = lambda _name: _fake_callable
 sys.modules.setdefault("cv2", fake_cv2)
 sys.modules.setdefault("numpy", fake_numpy)
 
-from detector.pipeline import run_detection_with_retries
+from detector.pipeline import _resolve_motion_feature_flags, run_detection_with_retries
 from workflows.unified_pipeline import _stage_detect_projection
 
 
@@ -200,6 +200,39 @@ class DetectionRetryTests(unittest.TestCase):
             num_frames=12,
             debug_base_dir="/tmp/debug",
         )
+
+
+class MotionFeatureFlagResolutionTests(unittest.TestCase):
+    def test_baseline_profile_keeps_safe_defaults(self):
+        flags = _resolve_motion_feature_flags(
+            {
+                "motion_rollout_profile": "baseline",
+                "flow_enable_refinement": False,
+                "flow_enable_fb_check": False,
+                "enable_geometry_evidence": False,
+                "flow_fb_threshold": 1.5,
+                "geometry_evidence_weight": 0.2,
+            }
+        )
+        self.assertEqual(flags["profile"], "baseline")
+        self.assertFalse(flags["enable_refinement"])
+        self.assertFalse(flags["enable_fb_check"])
+        self.assertFalse(flags["enable_geometry_evidence"])
+        self.assertAlmostEqual(flags["fb_threshold"], 1.5)
+
+    def test_robust_profile_enables_fb_and_geometry(self):
+        flags = _resolve_motion_feature_flags({"motion_rollout_profile": "robust"})
+        self.assertEqual(flags["profile"], "robust")
+        self.assertTrue(flags["enable_fb_check"])
+        self.assertTrue(flags["enable_geometry_evidence"])
+        self.assertFalse(flags["enable_refinement"])
+
+    def test_high_accuracy_profile_enables_all(self):
+        flags = _resolve_motion_feature_flags({"motion_rollout_profile": "high_accuracy"})
+        self.assertEqual(flags["profile"], "high_accuracy")
+        self.assertTrue(flags["enable_refinement"])
+        self.assertTrue(flags["enable_fb_check"])
+        self.assertTrue(flags["enable_geometry_evidence"])
 
 
 if __name__ == "__main__":

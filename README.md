@@ -47,7 +47,7 @@ detector/
   video_io.py           OpenCV frame extraction + ffmpeg codec-normalisation fallback
   line_detection.py     Horizontal / vertical seam detection
   stereo_detection.py   Histogram-based stereo-equirectangular detection
-  motion_analysis.py    Farneback / DIS optical flow + region scoring
+  motion_analysis.py    Optical-flow backends + region and geometry evidence scoring
   projection_logic.py   EAC vs cubemap hypothesis scoring
   equirectangular_detection.py  Wrap-around boundary-continuity evidence
   projection_conversion.py      ffmpeg v360 conversion
@@ -103,6 +103,10 @@ source bin/activate          # Linux / macOS
 
 pip install -r requirements.txt
 ```
+
+> OpenCV dependency note: this project uses `opencv-contrib-python` (which
+> already includes core OpenCV modules). Do not install `opencv-python` in the
+> same environment.
 
 All subsequent commands must be run from the project root with the virtualenv
 active so that `app`, `config`, `core`, `detector`, `workflows`, and `utils`
@@ -293,7 +297,13 @@ root. Defaults shown are the values used when a variable is not set.
 | `VPD_LINE_MIN_COVERAGE_RATIO` | `0.20` | Minimum seam coverage fraction across frame width |
 | `VPD_STEREO_HIST_THRESHOLD` | `0.92` | Histogram correlation threshold for stereo detection |
 | `VPD_SAVE_STEREO_HALVES` | `true` | Save left/right half-frame debug images |
-| `VPD_FLOW_ALGORITHM` | `farneback` | Optical-flow algorithm: `farneback` or `dis` |
+| `VPD_FLOW_ALGORITHM` | `farneback` | Optical-flow algorithm (`farneback`, `dis`, and contrib options when available) |
+| `VPD_FLOW_ENABLE_REFINEMENT` | `false` | Enable optional variational refinement on top of base optical flow |
+| `VPD_FLOW_ENABLE_FB_CHECK` | `false` | Enable forward-backward optical-flow consistency filtering |
+| `VPD_FLOW_FB_THRESHOLD` | `1.5` | Forward-backward consistency threshold in pixels |
+| `VPD_ENABLE_GEOMETRY_EVIDENCE` | `false` | Enable geometry-evidence fusion from robust homography fitting |
+| `VPD_GEOMETRY_EVIDENCE_WEIGHT` | `0.20` | Blend weight for geometry evidence in EAC-vs-cubic scoring |
+| `VPD_MOTION_ROLLOUT_PROFILE` | `baseline` | Motion profile: `baseline`, `robust`, `high_accuracy` |
 
 ---
 

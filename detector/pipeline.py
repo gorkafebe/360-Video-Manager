@@ -18,7 +18,14 @@ from .debug_utils import (
     save_stereo_halves,
 )
 from .line_detection import detect_horizontal_line, detect_vertical_line
-from .motion_analysis import compute_optical_flow, compute_region_affine_angles, compute_region_motion, split_into_regions
+from .motion_analysis import (
+    compute_forward_backward_consistency_mask,
+    compute_global_geometry_evidence,
+    compute_optical_flow,
+    compute_region_affine_angles,
+    compute_region_motion,
+    split_into_regions,
+)
 from .projection_logic import decide_projection, evaluate_cubemap, evaluate_eac
 from .region_validation import is_region_valid
 from .equirectangular_detection import aggregate_equirectangular_evidence, compute_frame_equirectangular_evidence
@@ -38,6 +45,45 @@ def load_config():
 
 CONFIG = load_config()
 
+
+def _resolve_motion_feature_flags(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    cfg = config or CONFIG
+    profile = str(cfg.get("motion_rollout_profile", "baseline")).strip().lower()
+    enable_refinement = bool(cfg.get("flow_enable_refinement", False))
+    enable_fb_check = bool(cfg.get("flow_enable_fb_check", False))
+    enable_geometry_evidence = bool(cfg.get("enable_geometry_evidence", False))
+
+    if profile == "robust":
+        enable_fb_check = True
+        enable_geometry_evidence = True
+    elif profile == "high_accuracy":
+        enable_refinement = True
+        enable_fb_check = True
+        enable_geometry_evidence = True
+    else:
+        profile = "baseline"
+
+    return {
+        "profile": profile,
+        "enable_refinement": enable_refinement,
+        "enable_fb_check": enable_fb_check,
+        "fb_threshold": float(cfg.get("flow_fb_threshold", 1.5)),
+        "enable_geometry_evidence": enable_geometry_evidence,
+        "geometry_evidence_weight": float(cfg.get("geometry_evidence_weight", 0.20)),
+    }
+
+
+def _fuse_optional_score(
+    base_score: Optional[float],
+    optional_score: Optional[float],
+    optional_weight: float,
+) -> Optional[float]:
+    if base_score is None:
+        return None
+    if optional_score is None:
+        return float(base_score)
+    w = float(np.clip(optional_weight, 0.0, 0.45))
+    return float((1.0 - w) * float(base_score) + w * float(optional_score))
 
 
 def frame_esta_en_negro(frame: np.ndarray, umbral_intensidad: int = 16, proporcion_minima_oscura: float = 0.98) -> bool:
@@ -78,9 +124,46 @@ def _analyze_motion_pair_detailed(
     min_active_ratio: float = 0.06,
     min_layout_score_margin: float = 0.0,
     flow_algorithm: str = "farneback",
+    enable_flow_refinement: bool = False,
+    enable_forward_backward_check: bool = False,
+    forward_backward_threshold: float = 1.5,
+    enable_geometry_evidence: bool = False,
+    geometry_evidence_weight: float = 0.20,
 ) -> Dict[str, Any]:
     try:
-        flow = compute_optical_flow(frame1, frame2, gaussian_kernel_size, gaussian_sigma, flow_algorithm)
+        flow = compute_optical_flow(
+            frame1,
+            frame2,
+            gaussian_kernel_size,
+            gaussian_sigma,
+            flow_algorithm,
+            enable_refinement=enable_flow_refinement,
+        )
+        fb_mask: Optional[np.ndarray] = None
+        fb_valid_ratio = 1.0
+        if enable_forward_backward_check:
+            fb_mask = compute_forward_backward_consistency_mask(
+                frame1,
+                frame2,
+                gaussian_kernel_size=gaussian_kernel_size,
+                gaussian_sigma=gaussian_sigma,
+                flow_algorithm=flow_algorithm,
+                enable_refinement=enable_flow_refinement,
+                fb_threshold=forward_backward_threshold,
+            )
+            fb_valid_ratio = float(np.mean(fb_mask)) if fb_mask.size else 0.0
+
+        geometry_evidence = {
+            "valid": False,
+            "quality": 0.0,
+            "eac_score": None,
+            "cubic_score": None,
+            "inlier_ratio": 0.0,
+            "reprojection_error": 999.0,
+        }
+        if enable_geometry_evidence:
+            geometry_evidence = compute_global_geometry_evidence(frame1, frame2)
+
         region_bounds = split_into_regions(frame1)
 
         region_info: Dict[tuple, Dict[str, Any]] = {}
@@ -92,6 +175,7 @@ def _analyze_motion_pair_detailed(
                 (row, col, y0, y1, x0, x1),
                 umbral_magnitud=umbral_magnitud,
                 proporcion_minima_pixeles=proporcion_minima_pixeles,
+                valid_mask=fb_mask,
             )
             region_info[(row, col)] = info
             if is_region_valid(info, min_concentration=umbral_concentracion, min_active_ratio=min_active_ratio):
@@ -127,9 +211,20 @@ def _analyze_motion_pair_detailed(
             min_active_ratio=min_active_ratio,
             tolerancia_45_deg=tolerancia_45_deg,
         )
-        decision = decide_projection(
+        fused_eac_score = _fuse_optional_score(
             eac_eval["score"],
+            geometry_evidence.get("eac_score"),
+            geometry_evidence_weight if bool(geometry_evidence.get("valid")) else 0.0,
+        )
+        fused_cubic_score = _fuse_optional_score(
             cubic_eval["score"],
+            geometry_evidence.get("cubic_score"),
+            geometry_evidence_weight if bool(geometry_evidence.get("valid")) else 0.0,
+        )
+
+        decision = decide_projection(
+            fused_eac_score,
+            fused_cubic_score,
             min_margin=min_layout_score_margin,
         )
 
@@ -139,11 +234,17 @@ def _analyze_motion_pair_detailed(
             "decision": decision,
             "score_eac": eac_eval["score"],
             "score_cubic": cubic_eval["score"],
+            "score_eac_fused": fused_eac_score,
+            "score_cubic_fused": fused_cubic_score,
             "valid_regions": valid_regions,
             "invalid_regions": invalid_regions,
             "pair_mean_magnitude": pair_mean_magnitude,
             "pair_mean_active_ratio": pair_mean_active_ratio,
             "pair_motion_strength": pair_motion_strength,
+            "pair_fb_valid_ratio": fb_valid_ratio,
+            "pair_geometry_quality": float(geometry_evidence.get("quality", 0.0)),
+            "pair_geometry_inlier_ratio": float(geometry_evidence.get("inlier_ratio", 0.0)),
+            "pair_geometry_reprojection_error": float(geometry_evidence.get("reprojection_error", 999.0)),
             "status": status,
             "reason": reason,
             "flow": flow,
@@ -156,11 +257,17 @@ def _analyze_motion_pair_detailed(
             "decision": None,
             "score_eac": None,
             "score_cubic": None,
+            "score_eac_fused": None,
+            "score_cubic_fused": None,
             "valid_regions": 0,
             "invalid_regions": 0,
             "pair_mean_magnitude": 0.0,
             "pair_mean_active_ratio": 0.0,
             "pair_motion_strength": 0.0,
+            "pair_fb_valid_ratio": 0.0,
+            "pair_geometry_quality": 0.0,
+            "pair_geometry_inlier_ratio": 0.0,
+            "pair_geometry_reprojection_error": 999.0,
             "status": "discarded",
             "reason": "exception",
             "flow": None,
@@ -182,6 +289,12 @@ def _classify_non_equirectangular(
     dominant_ratio_threshold: float = 0.8,
     ambiguity_gap: float = 0.10,
     flow_algorithm: str = "farneback",
+    enable_flow_refinement: bool = False,
+    enable_forward_backward_check: bool = False,
+    forward_backward_threshold: float = 1.5,
+    enable_geometry_evidence: bool = False,
+    geometry_evidence_weight: float = 0.20,
+    confidence_rollout_profile: str = "baseline",
 ) -> Dict[str, Any]:
     def _build_pair_plan(seq_len: int, prioritize_long: bool = False) -> List[tuple[int, int, int]]:
         if seq_len < 2:
@@ -212,14 +325,20 @@ def _classify_non_equirectangular(
         return pairs
 
     def _pair_weight(pair_result: Dict[str, Any]) -> float:
-        score_eac = pair_result.get("score_eac")
-        score_cubic = pair_result.get("score_cubic")
+        score_eac = pair_result.get("score_eac_fused")
+        score_cubic = pair_result.get("score_cubic_fused")
         layout_margin = 0.0
         if score_eac is not None and score_cubic is not None:
             layout_margin = abs(float(score_eac) - float(score_cubic))
         motion_strength = float(pair_result.get("pair_motion_strength", 0.0))
+        geometry_quality = float(pair_result.get("pair_geometry_quality", 0.0))
         motion_component = min(1.0, motion_strength / 0.10)
-        weight = 0.35 + (0.40 * motion_component) + (0.25 * min(1.0, layout_margin))
+        weight = (
+            0.30
+            + (0.35 * motion_component)
+            + (0.20 * min(1.0, layout_margin))
+            + (0.15 * np.clip(geometry_quality, 0.0, 1.0))
+        )
         return max(0.1, weight)
 
     def _is_pair_low_motion(pair_result: Dict[str, Any]) -> bool:
@@ -239,6 +358,8 @@ def _classify_non_equirectangular(
     weighted_cubic = 0.0
     valid_pair_motion_magnitudes: List[float] = []
     valid_pair_active_ratios: List[float] = []
+    pair_geometry_qualities: List[float] = []
+    pair_layout_margins: List[float] = []
     low_motion_pairs = 0
     pair_gaps_used: List[int] = []
 
@@ -267,6 +388,11 @@ def _classify_non_equirectangular(
                     min_active_ratio=min_active_ratio,
                     min_layout_score_margin=min_layout_score_margin,
                     flow_algorithm=flow_algorithm,
+                    enable_flow_refinement=enable_flow_refinement,
+                    enable_forward_backward_check=enable_forward_backward_check,
+                    forward_backward_threshold=forward_backward_threshold,
+                    enable_geometry_evidence=enable_geometry_evidence,
+                    geometry_evidence_weight=geometry_evidence_weight,
                 )
                 short_pair_cache[(i, j)] = quick_pair
                 if quick_pair.get("decision") is None:
@@ -312,6 +438,11 @@ def _classify_non_equirectangular(
                     min_active_ratio=min_active_ratio,
                     min_layout_score_margin=min_layout_score_margin,
                     flow_algorithm=flow_algorithm,
+                    enable_flow_refinement=enable_flow_refinement,
+                    enable_forward_backward_check=enable_forward_backward_check,
+                    forward_backward_threshold=forward_backward_threshold,
+                    enable_geometry_evidence=enable_geometry_evidence,
+                    geometry_evidence_weight=geometry_evidence_weight,
                 )
 
             total_regiones_validas += int(pair_result.get("valid_regions", 0))
@@ -371,8 +502,8 @@ def _classify_non_equirectangular(
                             1,
                         )
 
-                score_eac = pair_result.get("score_eac")
-                score_cubic = pair_result.get("score_cubic")
+                score_eac = pair_result.get("score_eac_fused")
+                score_cubic = pair_result.get("score_cubic_fused")
                 eac_score_str = f"{score_eac:.3f}" if score_eac is not None else "N/A"
                 cubic_score_str = f"{score_cubic:.3f}" if score_cubic is not None else "N/A"
                 winner = "EAC" if pair_result.get("decision") else "CUBIC"
@@ -401,6 +532,11 @@ def _classify_non_equirectangular(
             pair_active = float(pair_result.get("pair_mean_active_ratio", 0.0))
             valid_pair_motion_magnitudes.append(pair_mag)
             valid_pair_active_ratios.append(pair_active)
+            pair_geometry_qualities.append(float(pair_result.get("pair_geometry_quality", 0.0)))
+            score_eac_fused = pair_result.get("score_eac_fused")
+            score_cubic_fused = pair_result.get("score_cubic_fused")
+            if score_eac_fused is not None and score_cubic_fused is not None:
+                pair_layout_margins.append(abs(float(score_eac_fused) - float(score_cubic_fused)))
             if _is_pair_low_motion(pair_result):
                 low_motion_pairs += 1
             if pair_result.get("score_eac") is not None:
@@ -456,6 +592,7 @@ def _classify_non_equirectangular(
             "motion_mean_pair_active_ratio": 0.0,
             "motion_pair_gaps_used": [],
             "weighted_ratio_eac": 0.0,
+            "pair_geometry_mean_quality": 0.0,
         }
 
     effective_min_valid_pairs = int(min_valid_pairs)
@@ -484,7 +621,31 @@ def _classify_non_equirectangular(
         else:
             clasificacion = "eac" if ratio_eac > ratio_cubic else "cubic"
 
-    motion_confidence = abs(ratio_eac - 0.5) * 2.0
+    base_confidence = abs(ratio_eac - 0.5) * 2.0
+    layout_confidence = float(np.clip(np.mean(pair_layout_margins) / 0.35, 0.0, 1.0)) if pair_layout_margins else 0.0
+    motion_signal_confidence = float(np.clip((mean_pair_magnitude * mean_pair_active_ratio) / 0.10, 0.0, 1.0))
+    geometry_confidence = float(np.clip(np.mean(pair_geometry_qualities), 0.0, 1.0)) if pair_geometry_qualities else 0.0
+    profile_key = str(confidence_rollout_profile or "baseline").strip().lower()
+    if profile_key == "high_accuracy":
+        motion_confidence = (
+            0.40 * base_confidence
+            + 0.20 * layout_confidence
+            + 0.15 * motion_signal_confidence
+            + 0.25 * geometry_confidence
+        )
+    elif profile_key == "robust":
+        motion_confidence = (
+            0.45 * base_confidence
+            + 0.25 * layout_confidence
+            + 0.20 * motion_signal_confidence
+            + 0.10 * geometry_confidence
+        )
+    else:
+        motion_confidence = (
+            0.65 * base_confidence
+            + 0.20 * layout_confidence
+            + 0.15 * motion_signal_confidence
+        )
     score_margin = abs(ratio_eac - ratio_cubic)
 
     reliability_reasons: List[str] = []
@@ -539,6 +700,7 @@ def _classify_non_equirectangular(
         "motion_mean_pair_active_ratio": mean_pair_active_ratio,
         "motion_pair_gaps_used": sorted(set(pair_gaps_used)),
         "weighted_ratio_eac": ratio_eac,
+        "pair_geometry_mean_quality": geometry_confidence,
     }
 
 
@@ -559,6 +721,12 @@ def run_detection_pipeline(
     gaussian_kernel_size: int = 5,
     gaussian_sigma: float = 1.2,
     flow_algorithm: str = "farneback",
+    enable_flow_refinement: bool = False,
+    enable_forward_backward_check: bool = False,
+    forward_backward_threshold: float = 1.5,
+    enable_geometry_evidence: bool = False,
+    geometry_evidence_weight: float = 0.20,
+    confidence_rollout_profile: str = "baseline",
 ) -> Dict[str, Any]:
     try:
         logger.info(f"Detectando tipo de proyección para: {video_path}")
@@ -798,6 +966,7 @@ def run_detection_pipeline(
         motion_mean_pair_magnitude = 0.0
         motion_mean_pair_active_ratio = 0.0
         motion_pair_gaps_used: List[int] = []
+        motion_pair_geometry_quality = 0.0
         stereo_avg_similarity = 0.0
 
         if frames_analyzed > 0:
@@ -921,6 +1090,12 @@ def run_detection_pipeline(
                             gaussian_kernel_size=gaussian_kernel_size,
                             gaussian_sigma=gaussian_sigma,
                             flow_algorithm=flow_algorithm,
+                            enable_flow_refinement=enable_flow_refinement,
+                            enable_forward_backward_check=enable_forward_backward_check,
+                            forward_backward_threshold=forward_backward_threshold,
+                            enable_geometry_evidence=enable_geometry_evidence,
+                            geometry_evidence_weight=geometry_evidence_weight,
+                            confidence_rollout_profile=confidence_rollout_profile,
                         )
                         projection_type = motion_result["classification"]
                         motion_reliable = bool(motion_result["reliable"])
@@ -939,6 +1114,7 @@ def run_detection_pipeline(
                         motion_mean_pair_magnitude = float(motion_result.get("motion_mean_pair_magnitude", 0.0))
                         motion_mean_pair_active_ratio = float(motion_result.get("motion_mean_pair_active_ratio", 0.0))
                         motion_pair_gaps_used = [int(x) for x in motion_result.get("motion_pair_gaps_used", [])]
+                        motion_pair_geometry_quality = float(motion_result.get("pair_geometry_mean_quality", 0.0))
                         logger.info(
                             "[MOTION] low_detected=%s low_ratio=%.0f%% mean_mag=%.3f mean_active=%.3f gaps=%s",
                             motion_low_detected,
@@ -1016,6 +1192,7 @@ def run_detection_pipeline(
             "motion_mean_pair_magnitude": f"{motion_mean_pair_magnitude:.3f}",
             "motion_mean_pair_active_ratio": f"{motion_mean_pair_active_ratio:.3f}",
             "motion_pair_gaps_used": ",".join(str(g) for g in motion_pair_gaps_used),
+            "motion_pair_geometry_quality": f"{motion_pair_geometry_quality:.3f}",
             "avg_eac_score": f"{motion_avg_eac_score:.3f}" if motion_avg_eac_score is not None else "N/A",
             "avg_cubic_score": f"{motion_avg_cubic_score:.3f}" if motion_avg_cubic_score is not None else "N/A",
             "score_margin": f"{motion_score_margin:.3f}",
@@ -1123,6 +1300,7 @@ def run_detection_with_retries(
     gaussian_kernel_size = 5
     gaussian_sigma = 1.2
     flow_algorithm = str(CONFIG["flow_algorithm"])
+    motion_flags = _resolve_motion_feature_flags()
     min_valid_pairs = 4
     min_motion_confidence = 0.2
     min_frames_analyzed_required = int(CONFIG["min_frames_analyzed_required"])
@@ -1179,6 +1357,12 @@ def run_detection_with_retries(
             gaussian_kernel_size=gaussian_kernel_size,
             gaussian_sigma=gaussian_sigma,
             flow_algorithm=flow_algorithm,
+            enable_flow_refinement=bool(motion_flags["enable_refinement"]),
+            enable_forward_backward_check=bool(motion_flags["enable_fb_check"]),
+            forward_backward_threshold=float(motion_flags["fb_threshold"]),
+            enable_geometry_evidence=bool(motion_flags["enable_geometry_evidence"]),
+            geometry_evidence_weight=float(motion_flags["geometry_evidence_weight"]),
+            confidence_rollout_profile=str(motion_flags["profile"]),
         )
 
         final_detection = detection_result

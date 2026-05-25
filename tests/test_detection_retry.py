@@ -1,5 +1,25 @@
+import sys
+import types
 import unittest
 from unittest.mock import patch
+
+
+def _fake_callable(*args, **kwargs):
+    return None
+
+
+fake_cv2 = types.ModuleType("cv2")
+fake_cv2.__getattr__ = lambda _name: _fake_callable
+
+fake_numpy = types.ModuleType("numpy")
+fake_numpy.ndarray = object
+fake_numpy.mean = lambda values: (sum(values) / len(values)) if values else 0.0
+fake_numpy.median = lambda values: sorted(values)[len(values) // 2] if values else 0.0
+fake_numpy.pi = 3.141592653589793
+fake_numpy.__getattr__ = lambda _name: _fake_callable
+
+sys.modules.setdefault("cv2", fake_cv2)
+sys.modules.setdefault("numpy", fake_numpy)
 
 from detector.pipeline import run_detection_with_retries
 from workflows.unified_pipeline import _stage_detect_projection

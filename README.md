@@ -1,6 +1,6 @@
 # 360-Video-Manager
 
-Download, detect, convert, and upload 360° videos — via GUI or CLI.
+Download, detect, convert, and upload 360° videos — via GUI.
 
 360-Video-Manager is a Python application that combines a deterministic
 projection-detection engine (no ML models required) with a complete
@@ -15,7 +15,6 @@ download → process → upload workflow for 360° video content.
 - [Setup](#setup)
 - [Configuration](#configuration)
 - [Usage — GUI](#usage--gui)
-- [Usage — CLI](#usage--cli)
 - [Pipeline stages](#pipeline-stages)
 - [Projection types](#projection-types)
 - [Output artifacts](#output-artifacts)
@@ -29,8 +28,7 @@ download → process → upload workflow for 360° video content.
 
 ```
 app/
-  main.py               Entry point: GUI by default, --cli forwards to cli.py
-  cli.py                argparse CLI; delegates all work to workflows/
+  main.py               Entry point: launches the GUI
   gui/
     gui_app.py          CustomTkinter GUI (no pipeline logic)
     progress_utils.py   Download progress parsing and rate-limiting helpers
@@ -168,81 +166,15 @@ panel, and upload options are in a scrollable content area above.
 
 ---
 
-## Usage — CLI
-
-```bash
-# Download from a YouTube URL, detect, convert, and upload
-python -m app.main --cli --url "https://youtu.be/XXXXXXXXXXX" --upload
-
-# Use a search query instead of a direct URL
-python -m app.main --cli --url "360 aerial drone" --upload --title "Aerial 360"
-
-# Upload with patient category + personalized tags
-python -m app.main --cli --url "https://youtu.be/XXXXXXXXXXX" --upload --category "patient-123" --tags "anxiety,grounding"
-
-# Create a new patient category on the fly
-python -m app.main --cli --url "https://youtu.be/XXXXXXXXXXX" --upload --new-category "Patient Jane Doe"
-
-# Process a local file (skip download step)
-python -m app.main --cli --local /path/to/video.mp4
-
-# Process a local file and upload
-python -m app.main --cli --local /path/to/video.mp4 --upload
-
-# Skip conversion even if the projection warrants it
-python -m app.main --cli --url "https://youtu.be/..." --no-convert
-
-# Show all options
-python -m app.main --cli --help
-```
-
-### CLI flags
-
-| Flag | Default | Description |
-|---|---|---|
-| `--url URL_OR_QUERY` | — | YouTube URL or free-text search query. Required unless `--local` is used. |
-| `--local VIDEO_PATH` | — | Path to a local video file; skips the download step. |
-| `--output-dir DIR` | `data/downloads` | Directory for downloaded and converted files. |
-| `--title TEXT` | filename | Upload title override. |
-| `--description TEXT` | `""` | Upload description. |
-| `--playlist NAME_OR_ID` | — | Existing MediaCMS playlist name or ID. |
-| `--new-playlist NAME` | — | Create a new playlist with this name and add the video. |
-| `--category ID` | — | Existing MediaCMS category ID (patient/session category). |
-| `--new-category NAME` | — | Create a new MediaCMS category and assign it to the upload. |
-| `--tags CSV` | `""` | Comma-separated personalized tags for upload metadata. |
-| `--upload` | off | Upload the final asset to MediaCMS. |
-| `--no-convert` | off | Skip equirectangular conversion. |
-| `--confidence-threshold FLOAT` | `0.5` | Minimum detection confidence to trigger conversion. |
-| `--detection-frames N` | `10` | Number of frames passed to the detector. |
-| `--preview-frames N` | `5` | Number of UI preview frames to extract. |
-| `--no-manifest` | off | Do not save a JSON job manifest. |
-| `--verbose` / `-v` | off | Enable DEBUG-level logging. |
-
-### CLI output
-
-On success:
-
-```
-[OK]  job_id=20260512_120000_123456
-      projection : eac
-      confidence : 91.0%
-      converted  : data/downloads/video_equirectangular.mp4
-      manifest   : data/jobs/job_20260512_120000_123456.json
-```
-
-On failure the error message is printed to stderr and the exit code is 1.
-
----
-
 ## Pipeline stages
 
 ```
 source URL / local file
     │
-    ├─ Stage 1: YouTube search / URL resolution   (skipped when --local is used)
+    ├─ Stage 1: YouTube search / URL resolution   (skipped for local-file jobs)
     │
     ├─ Stage 2: yt-dlp download                   → data/downloads/
-    │           (skipped when --local is used)
+    │           (skipped for local-file jobs)
     │
     ├─ Stage 3: Codec normalisation               single ffmpeg pass
     │           (video_io.convert_video_codec)     skipped when OpenCV can decode directly

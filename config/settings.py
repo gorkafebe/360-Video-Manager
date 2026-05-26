@@ -168,6 +168,20 @@ class Settings:
         self.enable_geometry_evidence: bool = _env_bool("VPD_ENABLE_GEOMETRY_EVIDENCE", False)
         self.geometry_evidence_weight: float = _env_float("VPD_GEOMETRY_EVIDENCE_WEIGHT", 0.20)
         self.motion_rollout_profile: str = _env_str("VPD_MOTION_ROLLOUT_PROFILE", "high_accuracy")
+        self.motion_feature_tiers: dict = {
+            "tier_a_features": [
+                "canny_morphology_houghlinesp",
+                "line_segment_detector",
+                "dft_orientation_checks",
+                "orb_bfmatcher",
+                "find_homography_ransac_usac_magsac",
+                "estimate_affine_partial_2d",
+                "forward_backward_consistency",
+                "variational_refinement",
+            ],
+            "tier_b_flow_algorithms": ["tvl1", "dis"],
+            "tier_c_flow_algorithms": ["deepflow", "pcaflow", "sparse_to_dense"],
+        }
 
         # Expose detector-compatible dict view (for backward compatibility with
         # detector modules that consume the CONFIG dict from pipeline.py).
@@ -192,6 +206,7 @@ class Settings:
             "enable_geometry_evidence": self.enable_geometry_evidence,
             "geometry_evidence_weight": self.geometry_evidence_weight,
             "motion_rollout_profile": self.motion_rollout_profile,
+            "motion_feature_tiers": self.motion_feature_tiers,
         }
 
     def ensure_runtime_dirs(self) -> None:

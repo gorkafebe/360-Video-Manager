@@ -19,11 +19,14 @@ from .debug_utils import (
 )
 from .line_detection import detect_horizontal_line, detect_vertical_line
 from .motion_analysis import (
+    build_flow_fallback_chain,
     compute_forward_backward_consistency_mask,
     compute_global_geometry_evidence,
     compute_optical_flow,
     compute_region_affine_angles,
     compute_region_motion,
+    get_opencv_capabilities,
+    normalize_flow_algorithm_name,
     split_into_regions,
 )
 from .projection_logic import decide_projection, evaluate_cubemap, evaluate_eac
@@ -44,16 +47,57 @@ def load_config():
     return _get_settings().as_detector_config()
 
 CONFIG = load_config()
+_MOTION_CAPABILITY_SNAPSHOT_EMITTED = False
+_DEFAULT_MOTION_FEATURE_TIERS: Dict[str, Any] = {
+    "tier_a_features": [
+        "canny_morphology_houghlinesp",
+        "line_segment_detector",
+        "dft_orientation_checks",
+        "orb_bfmatcher",
+        "find_homography_ransac_usac_magsac",
+        "estimate_affine_partial_2d",
+        "forward_backward_consistency",
+        "variational_refinement",
+    ],
+    "tier_b_flow_algorithms": ["tvl1", "dis"],
+    "tier_c_flow_algorithms": ["deepflow", "pcaflow", "sparse_to_dense"],
+}
 
 
 def _resolve_motion_feature_flags(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    cfg = config or CONFIG
+    global _MOTION_CAPABILITY_SNAPSHOT_EMITTED
+    cfg: Dict[str, Any] = dict(CONFIG)
+    if config:
+        cfg.update(config)
     profile = str(cfg.get("motion_rollout_profile", "high_accuracy")).strip().lower()
+    capabilities = get_opencv_capabilities()
+    feature_tiers_raw = cfg.get("motion_feature_tiers")
+    feature_tiers = dict(_DEFAULT_MOTION_FEATURE_TIERS)
+    if isinstance(feature_tiers_raw, dict):
+        feature_tiers.update(feature_tiers_raw)
+    tier_b_flow_algorithms = [
+        normalize_flow_algorithm_name(a)
+        for a in feature_tiers.get("tier_b_flow_algorithms", ["tvl1", "dis"])
+    ]
+    tier_c_flow_algorithms = [
+        normalize_flow_algorithm_name(a)
+        for a in feature_tiers.get("tier_c_flow_algorithms", ["deepflow", "pcaflow", "sparse_to_dense"])
+    ]
+
+    if not _MOTION_CAPABILITY_SNAPSHOT_EMITTED:
+        logger.info(
+            "[MOTION] OpenCV capability snapshot: %s",
+            ", ".join(f"{k}={int(bool(v))}" for k, v in sorted(capabilities.items())),
+        )
+        _MOTION_CAPABILITY_SNAPSHOT_EMITTED = True
+
     enable_refinement = bool(cfg.get("flow_enable_refinement", False))
     enable_fb_check = bool(cfg.get("flow_enable_fb_check", False))
     enable_geometry_evidence = bool(cfg.get("enable_geometry_evidence", False))
+    requested_algorithm = normalize_flow_algorithm_name(str(cfg.get("flow_algorithm", "farneback")))
 
     if profile == "robust":
+        enable_refinement = True
         enable_fb_check = True
         enable_geometry_evidence = True
     elif profile == "high_accuracy":
@@ -63,8 +107,42 @@ def _resolve_motion_feature_flags(config: Optional[Dict[str, Any]] = None) -> Di
     else:
         profile = "baseline"
 
+    if profile == "baseline":
+        selected_flow_algorithm = "dis" if requested_algorithm == "dis" and capabilities.get("has_dis", False) else "farneback"
+    else:
+        preferred_chain = []
+        if requested_algorithm in {"tvl1", "dis", "farneback"}:
+            preferred_chain.append(requested_algorithm)
+        preferred_chain.extend(tier_b_flow_algorithms)
+        preferred_chain.append("farneback")
+        preferred_chain.extend(tier_c_flow_algorithms)
+        selected_flow_algorithm = "farneback"
+        for algo in preferred_chain:
+            candidate_chain = build_flow_fallback_chain(
+                preferred_algorithm=algo,
+                capabilities=capabilities,
+                profile=profile,
+                tier_b_algorithms=tier_b_flow_algorithms,
+                tier_c_algorithms=tier_c_flow_algorithms,
+            )
+            if candidate_chain:
+                selected_flow_algorithm = candidate_chain[0]
+                break
+
+    flow_fallback_chain = build_flow_fallback_chain(
+        preferred_algorithm=selected_flow_algorithm,
+        capabilities=capabilities,
+        profile=profile,
+        tier_b_algorithms=tier_b_flow_algorithms,
+        tier_c_algorithms=tier_c_flow_algorithms,
+    )
+
     return {
         "profile": profile,
+        "capabilities": capabilities,
+        "feature_tiers": feature_tiers,
+        "flow_algorithm": selected_flow_algorithm,
+        "flow_fallback_chain": flow_fallback_chain,
         "enable_refinement": enable_refinement,
         "enable_fb_check": enable_fb_check,
         "fb_threshold": float(cfg.get("flow_fb_threshold", 1.5)),
@@ -1376,8 +1454,8 @@ def run_detection_with_retries(
 ) -> tuple[Dict[str, Any], Dict[str, str]]:
     gaussian_kernel_size = 5
     gaussian_sigma = 1.2
-    flow_algorithm = str(CONFIG["flow_algorithm"])
     motion_flags = _resolve_motion_feature_flags()
+    flow_algorithm = str(motion_flags["flow_algorithm"])
     min_valid_pairs = 4
     min_motion_confidence = 0.2
     min_frames_analyzed_required = int(CONFIG["min_frames_analyzed_required"])

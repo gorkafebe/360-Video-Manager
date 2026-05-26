@@ -297,13 +297,28 @@ root. Defaults shown are the values used when a variable is not set.
 | `VPD_LINE_MIN_COVERAGE_RATIO` | `0.20` | Minimum seam coverage fraction across frame width |
 | `VPD_STEREO_HIST_THRESHOLD` | `0.92` | Histogram correlation threshold for stereo detection |
 | `VPD_SAVE_STEREO_HALVES` | `true` | Save left/right half-frame debug images |
-| `VPD_FLOW_ALGORITHM` | `deepflow` | Optical-flow algorithm (`farneback`, `dis`, and contrib options when available) |
+| `VPD_FLOW_ALGORITHM` | `deepflow` | Preferred optical-flow algorithm hint; rollout profile and runtime capabilities can override to a higher-priority available algorithm |
 | `VPD_FLOW_ENABLE_REFINEMENT` | `false` | Enable optional variational refinement on top of base optical flow |
 | `VPD_FLOW_ENABLE_FB_CHECK` | `false` | Enable forward-backward optical-flow consistency filtering |
 | `VPD_FLOW_FB_THRESHOLD` | `1.5` | Forward-backward consistency threshold in pixels |
 | `VPD_ENABLE_GEOMETRY_EVIDENCE` | `false` | Enable geometry-evidence fusion from robust homography fitting |
 | `VPD_GEOMETRY_EVIDENCE_WEIGHT` | `0.20` | Blend weight for geometry evidence in EAC-vs-cubic scoring |
 | `VPD_MOTION_ROLLOUT_PROFILE` | `high_accuracy` | Motion profile: `baseline`, `robust`, `high_accuracy` |
+
+### Motion rollout profile behavior
+
+- **Tier A (primary evidence/features)**: Canny+morphology+HoughLinesP, LSD, DFT orientation checks, ORB+BFMatcher, homography with RANSAC/USAC_MAGSAC, `estimateAffinePartial2D`, forward-backward consistency masking, variational refinement.
+- **Tier B (high-value optional flow)**: `tvl1`, `dis`.
+- **Tier C (fallback flow)**: `deepflow`, `pcaflow`, `sparse_to_dense`.
+
+Runtime flow selection is capability-aware and deterministic:
+- `baseline`: `farneback` safe default (or `dis` only when explicitly requested and available).
+- `robust` / `high_accuracy`: prefer Tier B when available; Tier C is fallback; final fallback is always `farneback`.
+
+Safety invariants:
+- Non-equirectangular classification with failed reliability is downgraded to `unknown`.
+- Contradictory motion evidence keeps `unknown` unless consistency overrides are met.
+- Retry logic keeps early-stop behavior for stalled low-motion signals.
 
 ---
 

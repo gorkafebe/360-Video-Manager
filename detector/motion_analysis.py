@@ -9,6 +9,13 @@ from .preprocessing import prepare_frame_for_flow
 
 
 _OPENCV_CAPABILITIES_CACHE: Optional[Dict[str, bool]] = None
+_FLOW_CAPABILITY_KEY_BY_ALGO = {
+    "dis": "has_dis",
+    "tvl1": "has_tvl1",
+    "deepflow": "has_deepflow",
+    "pcaflow": "has_pcaflow",
+    "sparse_to_dense": "has_sparse_to_dense",
+}
 
 
 def _build_opencv_capabilities() -> Dict[str, bool]:
@@ -30,6 +37,67 @@ def get_opencv_capabilities(force_refresh: bool = False) -> Dict[str, bool]:
     if _OPENCV_CAPABILITIES_CACHE is None or force_refresh:
         _OPENCV_CAPABILITIES_CACHE = _build_opencv_capabilities()
     return dict(_OPENCV_CAPABILITIES_CACHE)
+
+
+def normalize_flow_algorithm_name(flow_algorithm: str) -> str:
+    raw = str(flow_algorithm or "farneback").strip().lower()
+    aliases = {
+        "sparse-to-dense": "sparse_to_dense",
+        "sparse2dense": "sparse_to_dense",
+        "dual_tvl1": "tvl1",
+        "dualtvl1": "tvl1",
+    }
+    return aliases.get(raw, raw)
+
+
+def is_flow_algorithm_available(
+    flow_algorithm: str,
+    capabilities: Optional[Dict[str, bool]] = None,
+) -> bool:
+    algo = normalize_flow_algorithm_name(flow_algorithm)
+    if algo == "farneback":
+        return True
+    caps = capabilities or get_opencv_capabilities()
+    capability_key = _FLOW_CAPABILITY_KEY_BY_ALGO.get(algo)
+    if capability_key is None:
+        return False
+    return bool(caps.get(capability_key, False))
+
+
+def build_flow_fallback_chain(
+    preferred_algorithm: str,
+    capabilities: Optional[Dict[str, bool]] = None,
+    profile: str = "baseline",
+    tier_b_algorithms: Optional[List[str]] = None,
+    tier_c_algorithms: Optional[List[str]] = None,
+) -> List[str]:
+    caps = capabilities or get_opencv_capabilities()
+    profile_key = str(profile or "baseline").strip().lower()
+    tier_b = [normalize_flow_algorithm_name(a) for a in (tier_b_algorithms or ["tvl1", "dis"])]
+    tier_c = [normalize_flow_algorithm_name(a) for a in (tier_c_algorithms or ["deepflow", "pcaflow", "sparse_to_dense"])]
+    preferred = normalize_flow_algorithm_name(preferred_algorithm)
+
+    if preferred == "farneback":
+        return ["farneback"]
+
+    ordered: List[str] = [preferred]
+    if profile_key in {"robust", "high_accuracy"}:
+        ordered.extend(tier_b)
+    elif profile_key == "baseline":
+        ordered.append("dis")
+    ordered.extend(tier_c)
+    ordered.append("farneback")
+
+    deduped: List[str] = []
+    for algo in ordered:
+        if algo in deduped:
+            continue
+        deduped.append(algo)
+
+    available = [algo for algo in deduped if is_flow_algorithm_available(algo, capabilities=caps)]
+    if "farneback" not in available:
+        available.append("farneback")
+    return available
 
 
 def _compute_farneback(gray1: np.ndarray, gray2: np.ndarray) -> np.ndarray:
@@ -102,13 +170,27 @@ def compute_optical_flow(
     """Compute dense optical flow between *frame1* and *frame2* with safe fallbacks."""
     gray1 = prepare_frame_for_flow(frame1, gaussian_kernel_size, gaussian_sigma)
     gray2 = prepare_frame_for_flow(frame2, gaussian_kernel_size, gaussian_sigma)
+    caps = get_opencv_capabilities()
+    flow_chain = build_flow_fallback_chain(
+        preferred_algorithm=flow_algorithm,
+        capabilities=caps,
+        profile="baseline",
+    )
 
     flow: Optional[np.ndarray] = None
-    if flow_algorithm == "dis" and get_opencv_capabilities().get("has_dis", False):
-        dis = cv2.DISOpticalFlow_create(cv2.DISOPTICAL_FLOW_PRESET_MEDIUM)
-        flow = dis.calc(gray1, gray2, None)
-    elif flow_algorithm != "farneback":
-        flow = _compute_contrib_flow(gray1, gray2, flow_algorithm)
+    for candidate in flow_chain:
+        try:
+            if candidate == "farneback":
+                flow = _compute_farneback(gray1, gray2)
+            elif candidate == "dis" and caps.get("has_dis", False):
+                dis = cv2.DISOpticalFlow_create(cv2.DISOPTICAL_FLOW_PRESET_MEDIUM)
+                flow = dis.calc(gray1, gray2, None)
+            else:
+                flow = _compute_contrib_flow(gray1, gray2, candidate)
+        except Exception:
+            flow = None
+        if flow is not None:
+            break
 
     if flow is None:
         flow = _compute_farneback(gray1, gray2)
@@ -307,7 +389,8 @@ def compute_global_geometry_evidence(
         src_pts = np.array([kp1[m.queryIdx].pt for m in matches], dtype=np.float32).reshape(-1, 1, 2)
         dst_pts = np.array([kp2[m.trainIdx].pt for m in matches], dtype=np.float32).reshape(-1, 1, 2)
 
-        method = cv2.USAC_MAGSAC if hasattr(cv2, "USAC_MAGSAC") else cv2.RANSAC
+        caps = get_opencv_capabilities()
+        method = cv2.USAC_MAGSAC if bool(caps.get("has_usac_magsac", False)) else cv2.RANSAC
         H, inlier_mask = cv2.findHomography(src_pts, dst_pts, method=method, ransacReprojThreshold=3.0)
         if H is None or inlier_mask is None:
             return {"valid": False, "inlier_ratio": 0.0, "reprojection_error": 999.0, "quality": 0.0}

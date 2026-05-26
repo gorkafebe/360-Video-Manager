@@ -203,14 +203,44 @@ class DetectionRetryTests(unittest.TestCase):
 
 
 class MotionFeatureFlagResolutionTests(unittest.TestCase):
-    def test_default_profile_is_high_accuracy(self):
+    @patch(
+        "detector.pipeline.get_opencv_capabilities",
+        return_value={
+            "has_optflow_module": True,
+            "has_dis": True,
+            "has_tvl1": True,
+            "has_deepflow": True,
+            "has_pcaflow": True,
+            "has_sparse_to_dense": True,
+            "has_variational_refinement": True,
+            "has_usac_magsac": True,
+        },
+    )
+    def test_default_profile_is_high_accuracy(self, _mock_caps):
         flags = _resolve_motion_feature_flags({})
         self.assertEqual(flags["profile"], "high_accuracy")
         self.assertTrue(flags["enable_refinement"])
         self.assertTrue(flags["enable_fb_check"])
         self.assertTrue(flags["enable_geometry_evidence"])
+        self.assertEqual(flags["flow_algorithm"], "tvl1")
+        self.assertTrue(flags["flow_fallback_chain"])
+        self.assertIn("tier_b_flow_algorithms", flags["feature_tiers"])
+        self.assertIn("tier_c_flow_algorithms", flags["feature_tiers"])
 
-    def test_baseline_profile_keeps_safe_defaults(self):
+    @patch(
+        "detector.pipeline.get_opencv_capabilities",
+        return_value={
+            "has_optflow_module": False,
+            "has_dis": False,
+            "has_tvl1": False,
+            "has_deepflow": False,
+            "has_pcaflow": False,
+            "has_sparse_to_dense": False,
+            "has_variational_refinement": False,
+            "has_usac_magsac": False,
+        },
+    )
+    def test_baseline_profile_keeps_safe_defaults(self, _mock_caps):
         flags = _resolve_motion_feature_flags(
             {
                 "motion_rollout_profile": "baseline",
@@ -226,20 +256,96 @@ class MotionFeatureFlagResolutionTests(unittest.TestCase):
         self.assertFalse(flags["enable_fb_check"])
         self.assertFalse(flags["enable_geometry_evidence"])
         self.assertAlmostEqual(flags["fb_threshold"], 1.5)
+        self.assertEqual(flags["flow_algorithm"], "farneback")
+        self.assertEqual(flags["flow_fallback_chain"], ["farneback"])
 
-    def test_robust_profile_enables_fb_and_geometry(self):
+    @patch(
+        "detector.pipeline.get_opencv_capabilities",
+        return_value={
+            "has_optflow_module": True,
+            "has_dis": True,
+            "has_tvl1": False,
+            "has_deepflow": False,
+            "has_pcaflow": False,
+            "has_sparse_to_dense": False,
+            "has_variational_refinement": False,
+            "has_usac_magsac": False,
+        },
+    )
+    def test_baseline_profile_allows_dis_when_requested_and_available(self, _mock_caps):
+        flags = _resolve_motion_feature_flags(
+            {
+                "motion_rollout_profile": "baseline",
+                "flow_algorithm": "dis",
+            }
+        )
+        self.assertEqual(flags["flow_algorithm"], "dis")
+        self.assertEqual(flags["flow_fallback_chain"][0], "dis")
+        self.assertEqual(flags["flow_fallback_chain"][-1], "farneback")
+
+    @patch(
+        "detector.pipeline.get_opencv_capabilities",
+        return_value={
+            "has_optflow_module": True,
+            "has_dis": True,
+            "has_tvl1": True,
+            "has_deepflow": True,
+            "has_pcaflow": True,
+            "has_sparse_to_dense": True,
+            "has_variational_refinement": True,
+            "has_usac_magsac": True,
+        },
+    )
+    def test_robust_profile_enables_fb_and_geometry(self, _mock_caps):
         flags = _resolve_motion_feature_flags({"motion_rollout_profile": "robust"})
         self.assertEqual(flags["profile"], "robust")
         self.assertTrue(flags["enable_fb_check"])
         self.assertTrue(flags["enable_geometry_evidence"])
-        self.assertFalse(flags["enable_refinement"])
+        self.assertTrue(flags["enable_refinement"])
+        self.assertEqual(flags["flow_algorithm"], "tvl1")
 
-    def test_high_accuracy_profile_enables_all(self):
+    @patch(
+        "detector.pipeline.get_opencv_capabilities",
+        return_value={
+            "has_optflow_module": True,
+            "has_dis": True,
+            "has_tvl1": True,
+            "has_deepflow": True,
+            "has_pcaflow": True,
+            "has_sparse_to_dense": True,
+            "has_variational_refinement": True,
+            "has_usac_magsac": True,
+        },
+    )
+    def test_high_accuracy_profile_enables_all(self, _mock_caps):
         flags = _resolve_motion_feature_flags({"motion_rollout_profile": "high_accuracy"})
         self.assertEqual(flags["profile"], "high_accuracy")
         self.assertTrue(flags["enable_refinement"])
         self.assertTrue(flags["enable_fb_check"])
         self.assertTrue(flags["enable_geometry_evidence"])
+
+    @patch(
+        "detector.pipeline.get_opencv_capabilities",
+        return_value={
+            "has_optflow_module": True,
+            "has_dis": False,
+            "has_tvl1": True,
+            "has_deepflow": True,
+            "has_pcaflow": True,
+            "has_sparse_to_dense": True,
+            "has_variational_refinement": True,
+            "has_usac_magsac": True,
+        },
+    )
+    def test_high_accuracy_prefers_tier_b_over_requested_tier_c(self, _mock_caps):
+        flags = _resolve_motion_feature_flags(
+            {
+                "motion_rollout_profile": "high_accuracy",
+                "flow_algorithm": "deepflow",
+            }
+        )
+        self.assertEqual(flags["flow_algorithm"], "tvl1")
+        self.assertEqual(flags["flow_fallback_chain"][0], "tvl1")
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ download → process → upload workflow for 360° video content.
 ## Table of Contents
 
 - [Architecture](#architecture)
+- [Agent governance artifacts](#agent-governance-artifacts)
 - [Prerequisites](#prerequisites)
 - [Setup](#setup)
 - [Configuration](#configuration)
@@ -361,3 +362,18 @@ produce incorrect output. Update `_V360_INPUT_FORMAT["cubic"]` in
 The motion-analysis branch requires sufficient camera or scene motion. Near-
 static 360° content may produce low-confidence results and a final classification
 of `unknown`, which then triggers the EAC fallback during conversion.
+
+---
+
+## Agent governance artifacts
+
+This repository now includes agent-governance artifacts grounded in the current
+implementation:
+
+- `AGENTS.md` — repository-specific operational and safety constraints for autonomous agents.
+- `skills/unified-pipeline-contract/SKILL.md` — stage-order and result-contract enforcement.
+- `skills/projection-detection-reliability/SKILL.md` — detector reliability-policy enforcement.
+- `skills/conversion-fallback-integrity/SKILL.md` — conversion mapping and fallback safety.
+- `prompts/analyze-repository.md` — explicit read-only repository audit prompt.
+- `prompts/audit-detection-policy.md` — explicit detector policy audit prompt.
+- `prompts/plan-controlled-refactor.md` — explicit constrained-refactor planning prompt.

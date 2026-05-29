@@ -89,6 +89,11 @@ class CategoriesApiTests(unittest.TestCase):
             categories = get_categories(api_url="https://cms.example.com/api/v1/media")
 
         self.assertEqual(categories, [])
+        mock_get.assert_called_once_with(
+            "https://cms.example.com/api/v1/categories",
+            auth=mock_get.call_args.kwargs["auth"],
+            timeout=mock_get.call_args.kwargs["timeout"],
+        )
         self.assertTrue(any("invalid JSON from https://cms.example.com/api/v1/categories" in m for m in logs.output))
 
 
@@ -103,6 +108,11 @@ class PlaylistsApiTests(unittest.TestCase):
             playlists = get_playlists(api_url="https://cms.example.com/api/v1/media")
 
         self.assertEqual(playlists, [])
+        mock_get.assert_called_once_with(
+            "https://cms.example.com/api/v1/playlists",
+            auth=mock_get.call_args.kwargs["auth"],
+            timeout=mock_get.call_args.kwargs["timeout"],
+        )
         self.assertTrue(any("invalid JSON from https://cms.example.com/api/v1/playlists" in m for m in logs.output))
 
 

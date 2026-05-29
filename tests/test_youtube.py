@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from types import ModuleType
 from unittest.mock import MagicMock, patch
 
 from core.youtube import search_videos, extract_video_id
@@ -107,6 +108,35 @@ class SearchVideosOrderTest(unittest.TestCase):
         self.assertIn("channel", results[0])
         self.assertIn("url", results[0])
         self.assertTrue(results[0]["url"].startswith("https://youtu.be/"))
+
+    def test_build_disables_discovery_cache(self):
+        built_client = _build_mock_client(["AAA"], {"AAA": "360"})
+        discovery_module = ModuleType("googleapiclient.discovery")
+        discovery_module.build = MagicMock(return_value=built_client)
+        errors_module = ModuleType("googleapiclient.errors")
+        errors_module.HttpError = RuntimeError
+        package_module = ModuleType("googleapiclient")
+
+        with (
+            patch.dict(
+                "sys.modules",
+                {
+                    "googleapiclient": package_module,
+                    "googleapiclient.discovery": discovery_module,
+                    "googleapiclient.errors": errors_module,
+                },
+            ),
+            patch("core.youtube._get_api_key", return_value="fake_key"),
+        ):
+            results = search_videos("test query")
+
+        self.assertEqual([item["id"] for item in results], ["AAA"])
+        discovery_module.build.assert_called_once_with(
+            "youtube",
+            "v3",
+            developerKey="fake_key",
+            cache_discovery=False,
+        )
 
 
 class ExtractVideoIdTests(unittest.TestCase):

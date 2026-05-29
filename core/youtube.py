@@ -89,22 +89,27 @@ def search_videos(
         YouTubeAPIError: On API-level errors.
         YouTubeQuotaError: When the daily quota is exceeded.
     """
-    try:
-        from googleapiclient.discovery import build  # type: ignore
-        from googleapiclient.errors import HttpError  # type: ignore
-    except ImportError as exc:
-        raise ImportError(
-            "google-api-python-client is required for YouTube search. "
-            "Install it with: pip install google-api-python-client"
-        ) from exc
-
     key = _get_api_key(api_key)
 
     if not query or not isinstance(query, str):
         raise ValueError("query must be a non-empty string.")
 
     try:
-        client = youtube_client or build("youtube", "v3", developerKey=key)
+        client = youtube_client
+        if client is None:
+            try:
+                from googleapiclient.discovery import build  # type: ignore
+            except ImportError as exc:
+                raise ImportError(
+                    "google-api-python-client is required for YouTube search. "
+                    "Install it with: pip install google-api-python-client"
+                ) from exc
+            client = build(
+                "youtube",
+                "v3",
+                developerKey=key,
+                cache_discovery=False,
+            )
         all_video_ids: list = []
         _seen_ids: set = set()
 

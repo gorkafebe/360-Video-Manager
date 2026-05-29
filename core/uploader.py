@@ -199,10 +199,10 @@ def create_category(title: str, api_url: Optional[str] = None) -> Optional[str]:
     url = _get_api_url(api_url)
     auth = _get_auth()
     payload = {"title": title}
-    endpoint_paths = ("/categories/", "/category/")
+    endpoint_paths = ("/categories", "/categories/", "/category", "/category/")
+    failures = []
     try:
-        for attempt, path in enumerate(endpoint_paths):
-            is_last_attempt = attempt == len(endpoint_paths) - 1
+        for path in endpoint_paths:
             endpoint = _build_endpoint(url, path)
             resp = requests.post(
                 endpoint,
@@ -222,14 +222,17 @@ def create_category(title: str, api_url: Optional[str] = None) -> Optional[str]:
                 return None
 
             preview = (resp.text or "")[:_RESPONSE_PREVIEW_MAX_LENGTH]
+            failures.append((resp.status_code, endpoint, preview))
+            if resp.status_code != 404:
+                break
+        if failures:
+            status_code, endpoint, preview = failures[-1]
             logger.warning(
                 "create_category: status %s from %s body=%r",
-                resp.status_code,
+                status_code,
                 endpoint,
                 preview,
             )
-            if resp.status_code != 404 or is_last_attempt:
-                break
         return None
     except requests.Timeout:
         logger.error("Timeout creating category.")

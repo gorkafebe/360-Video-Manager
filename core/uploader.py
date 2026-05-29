@@ -95,6 +95,19 @@ def _safe_json_response(resp, endpoint: str, operation: str):
         return None
 
 
+def _normalise_tags(tags: Optional[List[str]]) -> List[str]:
+    """Return cleaned upload tags with duplicates and blanks removed."""
+    clean: List[str] = []
+    seen = set()
+    for raw in tags or []:
+        tag = str(raw).strip()
+        if not tag or tag in seen:
+            continue
+        seen.add(tag)
+        clean.append(tag)
+    return clean
+
+
 def get_playlists(api_url: Optional[str] = None) -> List[Dict[str, Any]]:
     """Return the list of existing MediaCMS playlists."""
     import requests  # type: ignore
@@ -180,18 +193,33 @@ def create_category(title: str, api_url: Optional[str] = None) -> Optional[str]:
     """Create a new category and return its ID, or None on failure."""
     import requests  # type: ignore
     url = _get_api_url(api_url)
-    endpoint = _build_endpoint(url, "/categories/")
     auth = _get_auth()
+    payload = {"title": title}
+    endpoint_paths = ("/categories/", "/category/")
     try:
-        resp = requests.post(
-            endpoint,
-            json={"title": title},
-            auth=auth,
-            timeout=_REQUEST_TIMEOUT,
-        )
-        if resp.status_code in (200, 201):
-            return resp.json().get("id")
-        logger.warning("create_category: status %s", resp.status_code)
+        for idx, path in enumerate(endpoint_paths):
+            endpoint = _build_endpoint(url, path)
+            resp = requests.post(
+                endpoint,
+                json=payload,
+                auth=auth,
+                timeout=_REQUEST_TIMEOUT,
+            )
+            if resp.status_code in (200, 201):
+                data = _safe_json_response(resp, endpoint, "create_category")
+                if isinstance(data, dict):
+                    return data.get("id")
+                return None
+
+            preview = (resp.text or "")[:200]
+            logger.warning(
+                "create_category: status %s from %s body=%r",
+                resp.status_code,
+                endpoint,
+                preview,
+            )
+            if resp.status_code != 404 or idx == len(endpoint_paths) - 1:
+                break
         return None
     except requests.Timeout:
         logger.error("Timeout creating category.")
@@ -272,7 +300,7 @@ def upload_video_asset(
     data = {"title": title, "description": description}
     if category_id:
         data["category"] = str(category_id)
-    clean_tags = [t.strip() for t in (tags or []) if str(t).strip()]
+    clean_tags = _normalise_tags(tags)
     if clean_tags:
         data["tags"] = ",".join(clean_tags)
 

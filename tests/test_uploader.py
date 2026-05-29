@@ -6,7 +6,13 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, mock_open, patch
 
-from core.uploader import _build_endpoint, upload_video_asset, get_categories, get_playlists
+from core.uploader import (
+    _build_endpoint,
+    create_category,
+    get_categories,
+    get_playlists,
+    upload_video_asset,
+)
 
 
 class BuildEndpointTests(unittest.TestCase):
@@ -96,6 +102,32 @@ class CategoriesApiTests(unittest.TestCase):
         )
         self.assertTrue(any("invalid JSON from https://cms.example.com/api/v1/categories" in m for m in logs.output))
 
+    @patch("requests.post")
+    def test_create_category_fallbacks_to_singular_endpoint_on_404(self, mock_post):
+        first = MagicMock(status_code=404, text="not found")
+        second = MagicMock(status_code=201, text='{"id":"cat-9"}')
+        second.json.return_value = {"id": "cat-9"}
+        mock_post.side_effect = [first, second]
+
+        category_id = create_category("Patient 9", api_url="https://cms.example.com/api/v1/media")
+
+        self.assertEqual(category_id, "cat-9")
+        self.assertEqual(mock_post.call_count, 2)
+        self.assertEqual(mock_post.call_args_list[0].args[0], "https://cms.example.com/api/v1/categories/")
+        self.assertEqual(mock_post.call_args_list[1].args[0], "https://cms.example.com/api/v1/category/")
+
+    @patch("requests.post")
+    def test_create_category_logs_status_and_body_preview(self, mock_post):
+        mock_resp = MagicMock(status_code=403, text="forbidden body")
+        mock_post.return_value = mock_resp
+
+        with self.assertLogs("core.uploader", level="WARNING") as logs:
+            category_id = create_category("Patient 10", api_url="https://cms.example.com/api/v1/media")
+
+        self.assertIsNone(category_id)
+        self.assertTrue(any("create_category: status 403" in m for m in logs.output))
+        self.assertTrue(any("forbidden body" in m for m in logs.output))
+
 
 class PlaylistsApiTests(unittest.TestCase):
     @patch("requests.get")
@@ -157,6 +189,36 @@ class UploadMetadataTests(unittest.TestCase):
         self.assertIn("data", call_kwargs)
         self.assertEqual(call_kwargs["data"]["category"], "cat-1")
         self.assertEqual(call_kwargs["data"]["tags"], "anxiety,breathing")
+
+    @patch("config.settings.get_settings")
+    @patch("requests.post")
+    @patch("os.path.exists", return_value=True)
+    def test_upload_normalises_tags_and_drops_duplicates(
+        self,
+        _mock_exists,
+        mock_post,
+        mock_get_settings,
+    ):
+        mock_get_settings.return_value = self.fake_settings
+        mock_resp = MagicMock(status_code=201)
+        mock_resp.json.return_value = {
+            "friendly_token": "tok-124",
+            "media_url": "https://cms.example.com/media/tok-124",
+        }
+        mock_post.return_value = mock_resp
+
+        with patch("builtins.open", mock_open(read_data=b"video-bytes")):
+            result = upload_video_asset(
+                video_path="/tmp/video.mp4",
+                title="Session Upload",
+                description="desc",
+                api_url="https://cms.example.com/api/v1/media",
+                tags=[" anxiety ", "", "anxiety", 123, "123"],
+            )
+
+        self.assertTrue(result.success)
+        call_kwargs = mock_post.call_args.kwargs
+        self.assertEqual(call_kwargs["data"]["tags"], "anxiety,123")
 
     @patch("config.settings.get_settings")
     @patch("core.uploader.add_to_playlist")

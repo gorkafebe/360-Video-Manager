@@ -103,7 +103,7 @@ class CategoriesApiTests(unittest.TestCase):
         self.assertTrue(any("invalid JSON from https://cms.example.com/api/v1/categories" in m for m in logs.output))
 
     @patch("requests.post")
-    def test_create_category_fallbacks_to_singular_endpoint_on_404(self, mock_post):
+    def test_create_category_fallbacks_to_plural_without_trailing_slash_on_404(self, mock_post):
         api_url = "https://cms.example.com/api/v1/media"
         first = MagicMock(status_code=404, text="not found")
         second = MagicMock(status_code=201, text='{"id":"cat-9"}')
@@ -115,7 +115,24 @@ class CategoriesApiTests(unittest.TestCase):
         self.assertEqual(category_id, "cat-9")
         self.assertEqual(mock_post.call_count, 2)
         self.assertEqual(mock_post.call_args_list[0].args[0], _build_endpoint(api_url, "/categories/"))
-        self.assertEqual(mock_post.call_args_list[1].args[0], _build_endpoint(api_url, "/category/"))
+        self.assertEqual(mock_post.call_args_list[1].args[0], _build_endpoint(api_url, "/categories"))
+
+    @patch("requests.post")
+    def test_create_category_fallbacks_to_singular_endpoint_after_plural_variants(self, mock_post):
+        api_url = "https://cms.example.com/api/v1/media"
+        first = MagicMock(status_code=404, text="not found")
+        second = MagicMock(status_code=404, text="still not found")
+        third = MagicMock(status_code=201, text='{"id":"cat-10"}')
+        third.json.return_value = {"id": "cat-10"}
+        mock_post.side_effect = [first, second, third]
+
+        category_id = create_category("Patient 10", api_url=api_url)
+
+        self.assertEqual(category_id, "cat-10")
+        self.assertEqual(mock_post.call_count, 3)
+        self.assertEqual(mock_post.call_args_list[0].args[0], _build_endpoint(api_url, "/categories/"))
+        self.assertEqual(mock_post.call_args_list[1].args[0], _build_endpoint(api_url, "/categories"))
+        self.assertEqual(mock_post.call_args_list[2].args[0], _build_endpoint(api_url, "/category/"))
 
     @patch("requests.post")
     def test_create_category_logs_status_and_body_preview(self, mock_post):

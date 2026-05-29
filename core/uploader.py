@@ -199,7 +199,7 @@ def create_category(title: str, api_url: Optional[str] = None) -> Optional[str]:
     url = _get_api_url(api_url)
     auth = _get_auth()
     payload = {"title": title}
-    endpoint_paths = ("/categories/", "/category/")
+    endpoint_paths = ("/categories/", "/categories", "/category/")
     try:
         for attempt, path in enumerate(endpoint_paths):
             is_last_attempt = attempt == len(endpoint_paths) - 1

@@ -6,24 +6,24 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, mock_open, patch
 
-from core.uploader import _build_endpoint, upload_video_asset, get_categories
+from core.uploader import _build_endpoint, upload_video_asset, get_categories, get_playlists
 
 
 class BuildEndpointTests(unittest.TestCase):
-    """_build_endpoint must produce correct absolute URLs regardless of api_url shape."""
+    """_build_endpoint must resolve URLs under the CMS API namespace."""
 
     def test_standard_media_path(self):
         result = _build_endpoint("https://cms.example.com/api/v1/media", "/playlists")
-        self.assertEqual(result, "https://cms.example.com/playlists")
+        self.assertEqual(result, "https://cms.example.com/api/v1/playlists")
 
     def test_trailing_slash_on_api_url(self):
         result = _build_endpoint("https://cms.example.com/api/v1/media/", "/playlists")
-        self.assertEqual(result, "https://cms.example.com/playlists")
+        self.assertEqual(result, "https://cms.example.com/api/v1/playlists")
 
     def test_path_without_media_suffix(self):
         """Works even when CMS_API_URL does not end with /media."""
         result = _build_endpoint("https://cms.example.com/v2/videos", "/playlists")
-        self.assertEqual(result, "https://cms.example.com/playlists")
+        self.assertEqual(result, "https://cms.example.com/v2/playlists")
 
     def test_root_path_api_url(self):
         result = _build_endpoint("https://cms.example.com/media", "/playlists/")
@@ -31,15 +31,15 @@ class BuildEndpointTests(unittest.TestCase):
 
     def test_playlist_id_path(self):
         result = _build_endpoint("https://cms.example.com/api/v1/media", "/playlists/abc123")
-        self.assertEqual(result, "https://cms.example.com/playlists/abc123")
+        self.assertEqual(result, "https://cms.example.com/api/v1/playlists/abc123")
 
     def test_path_without_leading_slash_is_normalised(self):
         result = _build_endpoint("https://cms.example.com/api/v1/media", "playlists")
-        self.assertEqual(result, "https://cms.example.com/playlists")
+        self.assertEqual(result, "https://cms.example.com/api/v1/playlists")
 
     def test_host_preserved_exactly(self):
         result = _build_endpoint("https://my.cms.internal:8080/api/media", "/playlists")
-        self.assertEqual(result, "https://my.cms.internal:8080/playlists")
+        self.assertEqual(result, "https://my.cms.internal:8080/api/playlists")
 
     def test_create_playlist_endpoint(self):
         """create_playlist uses /playlists/ (trailing slash) for POST."""
@@ -73,6 +73,47 @@ class CategoriesApiTests(unittest.TestCase):
 
         categories = get_categories(api_url="https://cms.example.com/api/v1/media")
         self.assertEqual(categories, [{"id": "c1", "title": "Patient A"}])
+        mock_get.assert_called_once_with(
+            "https://cms.example.com/api/v1/categories",
+            auth=mock_get.call_args.kwargs["auth"],
+            timeout=mock_get.call_args.kwargs["timeout"],
+        )
+
+    @patch("requests.get")
+    def test_get_categories_handles_invalid_json_response(self, mock_get):
+        mock_resp = MagicMock(status_code=200, text="<html>not-json</html>")
+        mock_resp.json.side_effect = ValueError("bad json")
+        mock_get.return_value = mock_resp
+
+        with self.assertLogs("core.uploader", level="ERROR") as logs:
+            categories = get_categories(api_url="https://cms.example.com/api/v1/media")
+
+        self.assertEqual(categories, [])
+        mock_get.assert_called_once_with(
+            "https://cms.example.com/api/v1/categories",
+            auth=mock_get.call_args.kwargs["auth"],
+            timeout=mock_get.call_args.kwargs["timeout"],
+        )
+        self.assertTrue(any("invalid JSON from https://cms.example.com/api/v1/categories" in m for m in logs.output))
+
+
+class PlaylistsApiTests(unittest.TestCase):
+    @patch("requests.get")
+    def test_get_playlists_handles_invalid_json_response(self, mock_get):
+        mock_resp = MagicMock(status_code=200, text="<!doctype html>")
+        mock_resp.json.side_effect = ValueError("bad json")
+        mock_get.return_value = mock_resp
+
+        with self.assertLogs("core.uploader", level="ERROR") as logs:
+            playlists = get_playlists(api_url="https://cms.example.com/api/v1/media")
+
+        self.assertEqual(playlists, [])
+        mock_get.assert_called_once_with(
+            "https://cms.example.com/api/v1/playlists",
+            auth=mock_get.call_args.kwargs["auth"],
+            timeout=mock_get.call_args.kwargs["timeout"],
+        )
+        self.assertTrue(any("invalid JSON from https://cms.example.com/api/v1/playlists" in m for m in logs.output))
 
 
 class UploadMetadataTests(unittest.TestCase):

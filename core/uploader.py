@@ -60,21 +60,39 @@ def _get_api_url(api_url: Optional[str] = None) -> str:
 def _build_endpoint(api_url: str, path: str) -> str:
     """Build an absolute endpoint URL from *api_url* and a *path* suffix.
 
-    Strips the path component of *api_url* down to the scheme+host so that
-    the result is independent of whether *api_url* ends with ``/media``,
-    ``/api/v1/media``, or any other suffix.
+    Related endpoints are resolved under the same API namespace as *api_url*.
+    For example, when ``api_url`` is ``.../api/v1/media``, ``/playlists`` is
+    resolved as ``.../api/v1/playlists``.
 
     Example::
 
         _build_endpoint("https://cms.example.com/api/v1/media", "/playlists/")
-        # -> "https://cms.example.com/playlists/"
+        # -> "https://cms.example.com/api/v1/playlists/"
     """
     parsed = urlparse(api_url)
-    base = f"{parsed.scheme}://{parsed.netloc}"
-    # Ensure path starts with a slash for urljoin to work correctly.
+    api_path = parsed.path.rstrip("/")
+    namespace_path = api_path.rsplit("/", 1)[0] if "/" in api_path else ""
+    base = f"{parsed.scheme}://{parsed.netloc}{namespace_path}"
     if not path.startswith("/"):
         path = "/" + path
     return base + path
+
+
+def _safe_json_response(resp, endpoint: str, operation: str):
+    """Parse JSON response and log diagnostics if parsing fails."""
+    try:
+        return resp.json()
+    except ValueError as exc:
+        preview = (resp.text or "")[:200]
+        logger.error(
+            "%s: invalid JSON from %s (status=%s, body=%r): %s",
+            operation,
+            endpoint,
+            resp.status_code,
+            preview,
+            exc,
+        )
+        return None
 
 
 def get_playlists(api_url: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -86,9 +104,16 @@ def get_playlists(api_url: Optional[str] = None) -> List[Dict[str, Any]]:
     try:
         resp = requests.get(endpoint, auth=auth, timeout=_REQUEST_TIMEOUT)
         if resp.status_code == 200:
-            data = resp.json()
+            data = _safe_json_response(resp, endpoint, "get_playlists")
+            if data is None:
+                return []
             return data.get("results", data) if isinstance(data, dict) else data
-        logger.warning("get_playlists: unexpected status %s", resp.status_code)
+        logger.warning(
+            "get_playlists: unexpected status %s from %s body=%r",
+            resp.status_code,
+            endpoint,
+            (resp.text or "")[:200],
+        )
         return []
     except requests.Timeout:
         logger.error("Timeout fetching playlists.")
@@ -132,9 +157,16 @@ def get_categories(api_url: Optional[str] = None) -> List[Dict[str, Any]]:
     try:
         resp = requests.get(endpoint, auth=auth, timeout=_REQUEST_TIMEOUT)
         if resp.status_code == 200:
-            data = resp.json()
+            data = _safe_json_response(resp, endpoint, "get_categories")
+            if data is None:
+                return []
             return data.get("results", data) if isinstance(data, dict) else data
-        logger.warning("get_categories: unexpected status %s", resp.status_code)
+        logger.warning(
+            "get_categories: unexpected status %s from %s body=%r",
+            resp.status_code,
+            endpoint,
+            (resp.text or "")[:200],
+        )
         return []
     except requests.Timeout:
         logger.error("Timeout fetching categories.")

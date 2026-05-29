@@ -110,7 +110,7 @@ class CategoriesApiTests(unittest.TestCase):
         second.json.return_value = {"id": "cat-9"}
         mock_post.side_effect = [first, second]
 
-        category_id = create_category("Patient 9", api_url=api_url)
+        category_id = create_category("Test Category 9", api_url=api_url)
 
         self.assertEqual(category_id, "cat-9")
         self.assertEqual(mock_post.call_count, 2)
@@ -126,7 +126,7 @@ class CategoriesApiTests(unittest.TestCase):
         third.json.return_value = {"id": "cat-10"}
         mock_post.side_effect = [first, second, third]
 
-        category_id = create_category("Patient 10", api_url=api_url)
+        category_id = create_category("Test Category 10", api_url=api_url)
 
         self.assertEqual(category_id, "cat-10")
         self.assertEqual(mock_post.call_count, 3)
@@ -140,7 +140,7 @@ class CategoriesApiTests(unittest.TestCase):
         mock_post.return_value = mock_resp
 
         with self.assertLogs("core.uploader", level="WARNING") as logs:
-            category_id = create_category("Patient 10", api_url="https://cms.example.com/api/v1/media")
+            category_id = create_category("Test Category 10", api_url="https://cms.example.com/api/v1/media")
 
         self.assertIsNone(category_id)
         self.assertTrue(any("create_category: status 403" in m for m in logs.output))

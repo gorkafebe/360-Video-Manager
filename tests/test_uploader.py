@@ -104,17 +104,18 @@ class CategoriesApiTests(unittest.TestCase):
 
     @patch("requests.post")
     def test_create_category_fallbacks_to_singular_endpoint_on_404(self, mock_post):
+        api_url = "https://cms.example.com/api/v1/media"
         first = MagicMock(status_code=404, text="not found")
         second = MagicMock(status_code=201, text='{"id":"cat-9"}')
         second.json.return_value = {"id": "cat-9"}
         mock_post.side_effect = [first, second]
 
-        category_id = create_category("Patient 9", api_url="https://cms.example.com/api/v1/media")
+        category_id = create_category("Patient 9", api_url=api_url)
 
         self.assertEqual(category_id, "cat-9")
         self.assertEqual(mock_post.call_count, 2)
-        self.assertEqual(mock_post.call_args_list[0].args[0], "https://cms.example.com/api/v1/categories/")
-        self.assertEqual(mock_post.call_args_list[1].args[0], "https://cms.example.com/api/v1/category/")
+        self.assertEqual(mock_post.call_args_list[0].args[0], _build_endpoint(api_url, "/categories/"))
+        self.assertEqual(mock_post.call_args_list[1].args[0], _build_endpoint(api_url, "/category/"))
 
     @patch("requests.post")
     def test_create_category_logs_status_and_body_preview(self, mock_post):
@@ -213,12 +214,13 @@ class UploadMetadataTests(unittest.TestCase):
                 title="Session Upload",
                 description="desc",
                 api_url="https://cms.example.com/api/v1/media",
-                tags=[" anxiety ", "", "anxiety", 123, "123"],
+                tags=[" anxiety ", "", "anxiety", 123, "123", 12.5, {"bad": "tag"}],
             )
 
         self.assertTrue(result.success)
         call_kwargs = mock_post.call_args.kwargs
-        self.assertEqual(call_kwargs["data"]["tags"], "anxiety,123")
+        # int 123 and string "123" collapse to the same final tag after normalisation.
+        self.assertEqual(call_kwargs["data"]["tags"], "anxiety,123,12.5")
 
     @patch("config.settings.get_settings")
     @patch("core.uploader.add_to_playlist")

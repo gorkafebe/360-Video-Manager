@@ -46,6 +46,8 @@ _THUMB_CARD   = (120, 68)
 _THUMB_DETAIL = (320, 180)
 _PAGE_SIZE    = 5
 _ACCENT       = "#1a7fd4"
+_NO_PLAYLIST  = "— sin lista de reproducción —"
+_NO_CATEGORY  = "— sin categoría —"
 
 
 # ── App state ─────────────────────────────────────────────────────────────────
@@ -132,8 +134,8 @@ class VR360ManagerApp:
     def __init__(self, master: ctk.CTk) -> None:
         self.master = master
         self.master.title("VR360 Media Manager")
-        self.master.geometry("1000x760")
-        self.master.minsize(700, 560)
+        self.master.geometry("1200x900")
+        self.master.minsize(900, 700)
 
         get_settings().ensure_runtime_dirs()
 
@@ -149,7 +151,7 @@ class VR360ManagerApp:
         self._playlists:         List[Dict]            = []
         self._categories:        List[Dict]            = []
         self._log_visible:  bool                  = False
-        self._status_var  = tkinter.StringVar(value="Ready")
+        self._status_var  = tkinter.StringVar(value="Listo")
         self._download_progress_lock = threading.Lock()
         self._download_progress_pending: Optional[tuple[Optional[float], str]] = None
         self._download_progress_scheduled: bool = False
@@ -186,21 +188,21 @@ class VR360ManagerApp:
 
         self._search_entry = ctk.CTkEntry(
             search_row,
-            placeholder_text="Search YouTube for 360° videos…",
+            placeholder_text="Buscar vídeos 360° en YouTube…",
             height=38,
         )
         self._search_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
         self._search_entry.bind("<Return>", lambda _: self._on_search())
 
         self._search_btn = ctk.CTkButton(
-            search_row, text="Search", width=100, height=38,
+            search_row, text="Buscar", width=100, height=38,
             command=self._on_search,
         )
         self._search_btn.pack(side="left")
 
         # ── Results ──
         ctk.CTkLabel(
-            content, text="Results",
+            content, text="Resultados",
             font=ctk.CTkFont(size=13, weight="bold"), anchor="w",
         ).pack(fill="x", pady=(4, 2))
 
@@ -212,7 +214,7 @@ class VR360ManagerApp:
         _sm_cont.pack(fill="x")
         self._show_more_btn = ctk.CTkButton(
             _sm_cont,
-            text="Show more results",
+            text="Mostrar más resultados",
             height=28,
             fg_color="transparent",
             border_width=1,
@@ -223,7 +225,7 @@ class VR360ManagerApp:
 
         # ── Selected video panel ──
         ctk.CTkLabel(
-            content, text="Selected video",
+            content, text="Vídeo seleccionado",
             font=ctk.CTkFont(size=13, weight="bold"), anchor="w",
         ).pack(fill="x", pady=(10, 2))
 
@@ -244,7 +246,7 @@ class VR360ManagerApp:
         info.pack(side="left", fill="both", expand=True, padx=(0, 12), pady=10)
 
         self._detail_title_lbl = ctk.CTkLabel(
-            info, text="No video selected",
+            info, text="Ningún vídeo seleccionado",
             font=ctk.CTkFont(size=15, weight="bold"),
             anchor="w", wraplength=540,
         )
@@ -268,7 +270,7 @@ class VR360ManagerApp:
 
         # ── Upload options ──
         ctk.CTkLabel(
-            content, text="Upload options",
+            content, text="Opciones de subida",
             font=ctk.CTkFont(size=13, weight="bold"), anchor="w",
         ).pack(fill="x", pady=(10, 2))
 
@@ -279,49 +281,49 @@ class VR360ManagerApp:
         upload_opts.pack(fill="x")
         upload_opts.columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(upload_opts, text="Title:").grid(
+        ctk.CTkLabel(upload_opts, text="Título:").grid(
             row=0, column=0, padx=(12, 6), pady=(10, 4), sticky="w")
         self._title_entry = ctk.CTkEntry(
-            upload_opts, placeholder_text="Video title…", height=32)
+            upload_opts, placeholder_text="Título del vídeo…", height=32)
         self._title_entry.grid(
             row=0, column=1, columnspan=2, padx=(0, 12), pady=(10, 4), sticky="ew")
 
-        ctk.CTkLabel(upload_opts, text="Playlist:").grid(
+        ctk.CTkLabel(upload_opts, text="Lista de reproducción:").grid(
             row=1, column=0, padx=(12, 6), pady=(4, 10), sticky="w")
-        self._playlist_var = tkinter.StringVar(value="— no playlist —")
+        self._playlist_var = tkinter.StringVar(value=_NO_PLAYLIST)
         self._playlist_menu = ctk.CTkOptionMenu(
             upload_opts,
             variable=self._playlist_var,
-            values=["— no playlist —"],
+            values=[_NO_PLAYLIST],
             width=300,
             dynamic_resizing=False,
         )
         self._playlist_menu.grid(row=1, column=1, padx=(0, 6), pady=(4, 10), sticky="w")
         ctk.CTkButton(
-            upload_opts, text="＋ New…", width=72,
+            upload_opts, text="＋ Nuevo…", width=72,
             command=self._on_new_playlist,
         ).grid(row=1, column=2, padx=(0, 12), pady=(4, 10))
 
-        ctk.CTkLabel(upload_opts, text="Patient (Category):").grid(
+        ctk.CTkLabel(upload_opts, text="Paciente (Categoría):").grid(
             row=2, column=0, padx=(12, 6), pady=(4, 10), sticky="w")
-        self._category_var = tkinter.StringVar(value="— no category —")
+        self._category_var = tkinter.StringVar(value=_NO_CATEGORY)
         self._category_menu = ctk.CTkOptionMenu(
             upload_opts,
             variable=self._category_var,
-            values=["— no category —"],
+            values=[_NO_CATEGORY],
             width=300,
             dynamic_resizing=False,
         )
         self._category_menu.grid(row=2, column=1, padx=(0, 6), pady=(4, 10), sticky="w")
         ctk.CTkButton(
-            upload_opts, text="＋ New…", width=72,
+            upload_opts, text="＋ Nuevo…", width=72,
             command=self._on_new_category,
         ).grid(row=2, column=2, padx=(0, 12), pady=(4, 10))
 
-        ctk.CTkLabel(upload_opts, text="Tags:").grid(
+        ctk.CTkLabel(upload_opts, text="Etiquetas:").grid(
             row=3, column=0, padx=(12, 6), pady=(0, 10), sticky="w")
         self._tags_entry = ctk.CTkEntry(
-            upload_opts, placeholder_text="tag1, tag2, tag3", height=32)
+            upload_opts, placeholder_text="etiqueta1, etiqueta2, etiqueta3", height=32)
         self._tags_entry.grid(
             row=3, column=1, columnspan=2, padx=(0, 12), pady=(0, 10), sticky="ew")
 
@@ -331,7 +333,7 @@ class VR360ManagerApp:
 
         self._dl_btn = ctk.CTkButton(
             actions,
-            text="⬇  Download & Process",
+            text="⬇  Descargar",
             height=42,
             font=ctk.CTkFont(size=14, weight="bold"),
             state="disabled",
@@ -341,7 +343,7 @@ class VR360ManagerApp:
 
         self._up_btn = ctk.CTkButton(
             actions,
-            text="⬆  Upload to CMS",
+            text="⬆  Subir",
             height=42,
             font=ctk.CTkFont(size=14, weight="bold"),
             fg_color=("gray65", "gray35"),
@@ -366,7 +368,7 @@ class VR360ManagerApp:
         # ── Log toggle ──
         self._log_toggle_btn = ctk.CTkButton(
             bottom,
-            text="▶  Show log",
+            text="▶  Mostrar registro",
             fg_color="transparent",
             text_color=("gray45", "gray65"),
             font=ctk.CTkFont(size=11),
@@ -500,21 +502,21 @@ class VR360ManagerApp:
         self._log_visible = not self._log_visible
         if self._log_visible:
             self._log_box.pack(fill="x", pady=(2, 0))
-            self._log_toggle_btn.configure(text="▼  Hide log")
+            self._log_toggle_btn.configure(text="▼  Ocultar registro")
         else:
             self._log_box.pack_forget()
-            self._log_toggle_btn.configure(text="▶  Show log")
+            self._log_toggle_btn.configure(text="▶  Mostrar registro")
 
     # ── Search ────────────────────────────────────────────────────────────────
 
     def _on_search(self) -> None:
         query = self._search_entry.get().strip()
         if not query:
-            tkinter.messagebox.showwarning("Warning", "Enter a search query.")
+            tkinter.messagebox.showwarning("Advertencia", "Introduce un término de búsqueda.")
             return
         self._max_results = _PAGE_SIZE
         self._set_state(AppState.SEARCHING)
-        self._progress_start_indeterminate("Searching…")
+        self._progress_start_indeterminate("Buscando…")
         threading.Thread(
             target=self._bg_search, args=(query, self._max_results), daemon=True,
         ).start()
@@ -525,7 +527,7 @@ class VR360ManagerApp:
             return
         self._max_results += _PAGE_SIZE
         self._set_state(AppState.SEARCHING)
-        self._progress_start_indeterminate("Loading more results…")
+        self._progress_start_indeterminate("Cargando más resultados…")
         threading.Thread(
             target=self._bg_search, args=(query, self._max_results), daemon=True,
         ).start()
@@ -544,7 +546,9 @@ class VR360ManagerApp:
         self._results = results
         self._render_cards(results)
         n = len(results)
-        self._set_status(f"Found {n} 360° video{'s' if n != 1 else ''}.")
+        verb = "Se encontró" if n == 1 else "Se encontraron"
+        noun = "vídeo" if n == 1 else "vídeos"
+        self._set_status(f"{verb} {n} {noun} 360°.")
         if n >= self._max_results:
             self._show_more_btn.pack(pady=(4, 2))
         else:
@@ -554,8 +558,8 @@ class VR360ManagerApp:
     def _on_search_error(self, msg: str) -> None:
         self._progress_reset()
         self._set_state(AppState.IDLE)
-        self._set_status("Search failed.")
-        tkinter.messagebox.showerror("Search error", msg)
+        self._set_status("Búsqueda fallida.")
+        tkinter.messagebox.showerror("Error de búsqueda", msg)
 
     # ── Results cards ─────────────────────────────────────────────────────────
 
@@ -575,7 +579,7 @@ class VR360ManagerApp:
         if not results:
             lbl = ctk.CTkLabel(
                 self._results_frame,
-                text="No 360° videos found. Try a different query.",
+                text="No se encontraron vídeos 360°. Prueba otra búsqueda.",
                 text_color=("gray50", "gray50"),
             )
             lbl.pack(pady=16)
@@ -611,7 +615,7 @@ class VR360ManagerApp:
 
         title_lbl = ctk.CTkLabel(
             txt,
-            text=item.get("title") or "Untitled",
+            text=item.get("title") or "Sin título",
             font=ctk.CTkFont(size=13, weight="bold"),
             anchor="w", wraplength=600,
         )
@@ -620,7 +624,7 @@ class VR360ManagerApp:
 
         ch_lbl = ctk.CTkLabel(
             txt,
-            text=f"{item.get('channel') or 'Unknown'}  ·  360°",
+            text=f"{item.get('channel') or 'Desconocido'}  ·  360°",
             anchor="w",
             font=ctk.CTkFont(size=11),
             text_color=("gray45", "gray60"),
@@ -659,7 +663,7 @@ class VR360ManagerApp:
             self._set_state(AppState.READY)
 
     def _update_detail(self, item: Dict) -> None:
-        title = item.get("title") or "Untitled"
+        title = item.get("title") or "Sin título"
         self._detail_title_lbl.configure(text=title)
         self._detail_channel_lbl.configure(text=item.get("channel") or "")
         self._detail_url_lbl.configure(text=item.get("url") or "")
@@ -679,27 +683,28 @@ class VR360ManagerApp:
 
     # ── Playlists & Categories ───────────────────────────────────────────────
 
-    def _bg_load_playlists(self) -> None:
+    def _bg_load_playlists(self, auto_select: Optional[str] = None) -> None:
         from core.uploader import get_playlists
         try:
             playlists = get_playlists()
         except Exception as exc:
             logger.debug("Playlist load failed: %s", exc)
             playlists = []
-        self.master.after(0, lambda p=playlists: self._set_playlists(p))
+        self.master.after(0, lambda p=playlists, selected=auto_select: self._set_playlists(p, selected))
 
-    def _set_playlists(self, playlists: List[Dict]) -> None:
+    def _set_playlists(self, playlists: List[Dict], auto_select: Optional[str] = None) -> None:
         self._playlists = playlists
-        values = ["— no playlist —"] + [
+        values = [_NO_PLAYLIST] + [
             str(p.get("title") or p.get("id") or f"Playlist {i + 1}")
             for i, p in enumerate(playlists)
         ]
         self._playlist_menu.configure(values=values)
-        self._playlist_var.set("— no playlist —")
+        chosen = next((value for value in values if value == auto_select), _NO_PLAYLIST)
+        self._playlist_var.set(chosen)
 
     def _get_playlist_id(self) -> Optional[str]:
         chosen = self._playlist_var.get()
-        if chosen == "— no playlist —":
+        if chosen == _NO_PLAYLIST:
             return None
         for p in self._playlists:
             label = str(p.get("title") or p.get("id") or "")
@@ -709,8 +714,8 @@ class VR360ManagerApp:
 
     def _on_new_playlist(self) -> None:
         dialog = ctk.CTkInputDialog(
-            text="Enter a name for the new playlist:",
-            title="New Playlist",
+            text="Introduce un nombre para la nueva lista de reproducción:",
+            title="Nueva lista de reproducción",
         )
         name = dialog.get_input()
         if name and name.strip():
@@ -726,29 +731,30 @@ class VR360ManagerApp:
                 logger.info("Created playlist %r (id=%s)", name, new_id)
         except Exception as exc:
             logger.warning("Could not create playlist: %s", exc)
-        self._bg_load_playlists()
+        self._bg_load_playlists(auto_select=name)
 
-    def _bg_load_categories(self) -> None:
+    def _bg_load_categories(self, auto_select: Optional[str] = None) -> None:
         from core.uploader import get_categories
         try:
             categories = get_categories()
         except Exception as exc:
             logger.debug("Category load failed: %s", exc)
             categories = []
-        self.master.after(0, lambda c=categories: self._set_categories(c))
+        self.master.after(0, lambda c=categories, selected=auto_select: self._set_categories(c, selected))
 
-    def _set_categories(self, categories: List[Dict]) -> None:
+    def _set_categories(self, categories: List[Dict], auto_select: Optional[str] = None) -> None:
         self._categories = categories
-        values = ["— no category —"] + [
+        values = [_NO_CATEGORY] + [
             str(c.get("title") or c.get("id") or f"Category {i + 1}")
             for i, c in enumerate(categories)
         ]
         self._category_menu.configure(values=values)
-        self._category_var.set("— no category —")
+        chosen = next((value for value in values if value == auto_select), _NO_CATEGORY)
+        self._category_var.set(chosen)
 
     def _get_category_id(self) -> Optional[str]:
         chosen = self._category_var.get()
-        if chosen == "— no category —":
+        if chosen == _NO_CATEGORY:
             return None
         for c in self._categories:
             label = str(c.get("title") or c.get("id") or "")
@@ -758,8 +764,8 @@ class VR360ManagerApp:
 
     def _on_new_category(self) -> None:
         dialog = ctk.CTkInputDialog(
-            text="Enter patient/category name:",
-            title="New Category",
+            text="Introduce el nombre del paciente/categoría:",
+            title="Nueva categoría",
         )
         name = dialog.get_input()
         if name and name.strip():
@@ -775,21 +781,21 @@ class VR360ManagerApp:
                 logger.info("Created category %r (id=%s)", name, new_id)
         except Exception as exc:
             logger.warning("Could not create category: %s", exc)
-        self._bg_load_categories()
+        self._bg_load_categories(auto_select=name)
 
     # ── Download & Process ────────────────────────────────────────────────────
 
     def _on_download_process(self) -> None:
         if not self._selected:
-            tkinter.messagebox.showwarning("Warning", "Select a video first.")
+            tkinter.messagebox.showwarning("Advertencia", "Selecciona un vídeo primero.")
             return
         url = self._selected.get("url")
         if not url:
-            tkinter.messagebox.showerror("Error", "Selected video has no URL.")
+            tkinter.messagebox.showerror("Error", "El vídeo seleccionado no tiene URL.")
             return
         self._ready_path = None
         self._set_state(AppState.PROCESSING)
-        self._progress_reset("Starting download…")
+        self._progress_reset("Iniciando descarga…")
         threading.Thread(target=self._bg_process, args=(url,), daemon=True).start()
 
     def _bg_process(self, url: str) -> None:
@@ -802,13 +808,13 @@ class VR360ManagerApp:
                 pct_lbl = str(d.get("_percent_str") or "").strip()
                 if not pct_lbl and frac is not None:
                     pct_lbl = f"{frac * 100:.1f}%"
-                status_msg = f"Downloading… {pct_lbl}".rstrip()
+                status_msg = f"Descargando… {pct_lbl}".rstrip()
                 self._queue_download_progress_update(frac, status_msg)
 
             elif status == "finished":
                 self._clear_download_progress_queue()
                 def _upd_proc():
-                    self._progress_start_indeterminate("Processing… (see log for details)")
+                    self._progress_start_indeterminate("Procesando… (ver registro para detalles)")
 
                 self.master.after(0, _upd_proc)
 
@@ -832,9 +838,9 @@ class VR360ManagerApp:
         if not result.success:
             self._progress.set(0)
             self._set_state(AppState.READY)
-            self._set_status("Processing failed.")
+            self._set_status("Procesamiento fallido.")
             tkinter.messagebox.showerror(
-                "Processing failed", result.error or "Unknown error")
+                "Procesamiento fallido", result.error or "Error desconocido")
             return
 
         self._ready_path = (
@@ -845,19 +851,19 @@ class VR360ManagerApp:
         self._progress.set(1.0)
         proj      = result.projection_type or "unknown"
         conf      = float(result.confidence or 0)
-        conv_note = " — converted to equirectangular" if result.converted_video_path else ""
-        self._set_status(f"Done — {proj} ({conf:.0%}){conv_note}")
+        conv_note = " — convertido a equirectangular" if result.converted_video_path else ""
+        self._set_status(f"Listo — {proj} ({conf:.0%}){conv_note}")
         self._set_state(AppState.PROCESSED)
         tkinter.messagebox.showinfo(
-            "Processing complete",
-            f"Projection: {proj}\nConfidence: {conf:.0%}{conv_note}\n\nReady to upload.",
+            "Procesamiento completo",
+            f"Proyección: {proj}\nConfianza: {conf:.0%}{conv_note}\n\nListo para subir.",
         )
 
     def _on_process_error(self, msg: str) -> None:
         self._progress_reset()
         self._set_state(AppState.READY if self._selected else AppState.IDLE)
-        self._set_status("Processing failed.")
-        tkinter.messagebox.showerror("Processing error", msg)
+        self._set_status("Procesamiento fallido.")
+        tkinter.messagebox.showerror("Error de procesamiento", msg)
 
     # ── Upload ────────────────────────────────────────────────────────────────
 
@@ -868,25 +874,25 @@ class VR360ManagerApp:
     def _on_upload(self) -> None:
         if not self._ready_path:
             tkinter.messagebox.showwarning(
-                "Warning",
-                "No processed video available.\nRun Download & Process first.",
+                "Advertencia",
+                "No hay vídeo procesado disponible.\nEjecuta primero Descargar.",
             )
             return
         title = self._title_entry.get().strip()
         if not title:
-            tkinter.messagebox.showwarning("Warning", "Enter a title for the upload.")
+            tkinter.messagebox.showwarning("Advertencia", "Introduce un título para la subida.")
             return
         playlist_id = self._get_playlist_id()
         category_id = self._get_category_id()
         if not category_id:
             tkinter.messagebox.showwarning(
-                "Warning",
-                "Select or create a patient category before uploading.",
+                "Advertencia",
+                "Selecciona o crea una categoría de paciente antes de subir.",
             )
             return
         tags = self._parse_tags(self._tags_entry.get().strip())
         self._set_state(AppState.UPLOADING)
-        self._progress_start_indeterminate("Uploading…")
+        self._progress_start_indeterminate("Subiendo…")
         threading.Thread(
             target=self._bg_upload,
             args=(self._ready_path, title, playlist_id, category_id, tags),
@@ -921,23 +927,23 @@ class VR360ManagerApp:
         self._progress.configure(mode="determinate")
         if result.success:
             self._progress.set(1.0)
-            self._set_status("Upload complete.")
+            self._set_status("Subida completa.")
             self._set_state(AppState.PROCESSED)
             tkinter.messagebox.showinfo(
-                "Upload complete",
-                f"Video uploaded successfully.\n{result.media_url or ''}",
+                "Subida completa",
+                f"Vídeo subido correctamente.\n{result.media_url or ''}",
             )
         else:
             self._progress.set(0)
             self._set_state(AppState.PROCESSED)
-            self._set_status("Upload failed.")
-            tkinter.messagebox.showerror("Upload failed", result.error or "Unknown error")
+            self._set_status("Error al subir.")
+            tkinter.messagebox.showerror("Error al subir", result.error or "Error desconocido")
 
     def _on_upload_error(self, msg: str) -> None:
         self._progress_reset()
         self._set_state(AppState.PROCESSED)
-        self._set_status("Upload failed.")
-        tkinter.messagebox.showerror("Upload error", msg)
+        self._set_status("Error al subir.")
+        tkinter.messagebox.showerror("Error de subida", msg)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -950,7 +956,7 @@ def run_gui() -> None:
         VR360ManagerApp(root)
     except Exception as exc:
         logger.exception("Fatal error during GUI initialisation")
-        tkinter.messagebox.showerror("Startup error", str(exc))
+        tkinter.messagebox.showerror("Error de inicio", str(exc))
         root.destroy()
         return
     root.mainloop()

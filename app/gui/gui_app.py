@@ -133,7 +133,7 @@ class VR360ManagerApp:
 
     def __init__(self, master: ctk.CTk) -> None:
         self.master = master
-        self.master.title("VR360 Media Manager")
+        self.master.title("Gestor de vídeos 360")
         self.master.geometry("1200x900")
         self.master.minsize(900, 700)
 
@@ -695,11 +695,15 @@ class VR360ManagerApp:
     def _set_playlists(self, playlists: List[Dict], auto_select: Optional[str] = None) -> None:
         self._playlists = playlists
         values = [_NO_PLAYLIST] + [
-            str(p.get("title") or p.get("id") or f"Playlist {i + 1}")
+            str(p.get("title") or p.get("id") or f"Lista de reproducción {i + 1}")
             for i, p in enumerate(playlists)
         ]
         self._playlist_menu.configure(values=values)
-        chosen = next((value for value in values if value == auto_select), _NO_PLAYLIST)
+        current = self._playlist_var.get()
+        chosen = next(
+            (value for value in values if value == auto_select),
+            current if current in values else _NO_PLAYLIST,
+        )
         self._playlist_var.set(chosen)
 
     def _get_playlist_id(self) -> Optional[str]:
@@ -745,11 +749,15 @@ class VR360ManagerApp:
     def _set_categories(self, categories: List[Dict], auto_select: Optional[str] = None) -> None:
         self._categories = categories
         values = [_NO_CATEGORY] + [
-            str(c.get("title") or c.get("id") or f"Category {i + 1}")
+            str(c.get("title") or c.get("id") or f"Categoría {i + 1}")
             for i, c in enumerate(categories)
         ]
         self._category_menu.configure(values=values)
-        chosen = next((value for value in values if value == auto_select), _NO_CATEGORY)
+        current = self._category_var.get()
+        chosen = next(
+            (value for value in values if value == auto_select),
+            current if current in values else _NO_CATEGORY,
+        )
         self._category_var.set(chosen)
 
     def _get_category_id(self) -> Optional[str]:
@@ -849,7 +857,7 @@ class VR360ManagerApp:
             or result.original_video_path
         )
         self._progress.set(1.0)
-        proj      = result.projection_type or "unknown"
+        proj      = result.projection_type or "desconocida"
         conf      = float(result.confidence or 0)
         conv_note = " — convertido a equirectangular" if result.converted_video_path else ""
         self._set_status(f"Listo — {proj} ({conf:.0%}){conv_note}")

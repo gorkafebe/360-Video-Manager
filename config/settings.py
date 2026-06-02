@@ -31,6 +31,7 @@ VPD_FLOW_FB_THRESHOLD       Forward-backward error threshold in pixels (default:
 VPD_ENABLE_GEOMETRY_EVIDENCE  Enable geometry quality evidence fusion (default: false).
 VPD_GEOMETRY_EVIDENCE_WEIGHT  Geometry evidence blend weight (default: 0.2).
 VPD_MOTION_ROLLOUT_PROFILE  Motion feature profile: baseline|robust|high_accuracy (default: high_accuracy).
+VPD_FORCE_FULL_CODEC_NORMALIZATION  Force legacy full-file pre-normalization transcode before detection (default: false).
 DOWNLOADS_DIR           Override default download directory.
 """
 
@@ -168,6 +169,7 @@ class Settings:
         self.enable_geometry_evidence: bool = _env_bool("VPD_ENABLE_GEOMETRY_EVIDENCE", False)
         self.geometry_evidence_weight: float = _env_float("VPD_GEOMETRY_EVIDENCE_WEIGHT", 0.20)
         self.motion_rollout_profile: str = _env_str("VPD_MOTION_ROLLOUT_PROFILE", "high_accuracy")
+        self.force_full_codec_normalization: bool = _env_bool("VPD_FORCE_FULL_CODEC_NORMALIZATION", False)
         self.motion_feature_tiers: dict = {
             "tier_a_features": [
                 "canny_morphology_houghlinesp",

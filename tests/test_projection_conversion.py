@@ -43,15 +43,18 @@ class ProjectionConversionCommandTests(unittest.TestCase):
         )
 
     def test_build_ffmpeg_command_uses_padded_v360_filter(self):
-        cmd = build_ffmpeg_command_for_projection(
-            "/tmp/input.mp4",
-            "/tmp/output.mp4",
-            "cubic",
-        )
+        with patch("detector.projection_conversion.detect_ffmpeg_h264_encoder", return_value="libx264"):
+            cmd = build_ffmpeg_command_for_projection(
+                "/tmp/input.mp4",
+                "/tmp/output.mp4",
+                "cubic",
+            )
         self.assertIn("-vf", cmd)
         vf = cmd[cmd.index("-vf") + 1]
         self.assertIn("v360=c3x2:equirect", vf)
         self.assertIn("pad=ceil(iw/2)*2:ceil(ih/2)*2:(ow-iw)/2:(oh-ih)/2", vf)
+        self.assertIn("-hwaccel", cmd)
+        self.assertIn("auto", cmd)
 
 
 class ProjectionConversionRetryTests(unittest.TestCase):

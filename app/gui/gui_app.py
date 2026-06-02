@@ -831,6 +831,7 @@ class VR360ManagerApp:
             upload=False,
             convert_if_needed=True,
             progress_callback=_prog,
+            force_full_codec_normalization=get_settings().force_full_codec_normalization,
         )
         try:
             result = process_video_job(opts)

@@ -48,6 +48,7 @@ Stereo-equi note
 import logging
 import os
 import subprocess
+from functools import lru_cache
 from typing import Any, Dict, List, Optional
 
 
@@ -103,6 +104,27 @@ _SKIP_PROJECTION_TYPES = frozenset({"equirectangular", "stereo_equi"})
 
 # Types considered "convertible" to equirectangular
 _CONVERTIBLE_PROJECTION_TYPES = frozenset(_V360_INPUT_FORMAT.keys())
+
+_HW_ENCODER_ORDER = ("h264_nvenc", "h264_qsv", "h264_videotoolbox", "h264_amf", "libx264")
+
+
+@lru_cache(maxsize=1)
+def detect_ffmpeg_h264_encoder() -> str:
+    """Detect best available ffmpeg H.264 encoder, preferring hardware backends."""
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-encoders"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception:
+        return "libx264"
+    text = (proc.stdout or "") + "\n" + (proc.stderr or "")
+    for candidate in _HW_ENCODER_ORDER:
+        if candidate in text:
+            return candidate
+    return "libx264"
 
 
 # ---------------------------------------------------------------------------
@@ -281,11 +303,13 @@ def build_ffmpeg_command_for_projection(
             f"No ffmpeg conversion strategy defined for projection type: {projection_type!r}"
         )
 
+    selected_encoder = detect_ffmpeg_h264_encoder()
     cmd: List[str] = [
         "ffmpeg",
         "-hide_banner",
         "-loglevel", "error",
         "-y",
+        "-hwaccel", "auto",
         "-i", input_path,
     ]
 
@@ -294,11 +318,11 @@ def build_ffmpeg_command_for_projection(
         cmd += [
             "-map", "0:v",
             "-vf", v360_filter,
-            "-c:v", "libx264",
-            "-preset", "veryfast",
-            "-crf", "18",
+            "-c:v", selected_encoder,
             "-pix_fmt", "yuv420p",
         ]
+        if selected_encoder == "libx264":
+            cmd += ["-preset", "veryfast", "-crf", "18"]
         if drop_audio:
             # Video-only output: drop audio (safe fallback for ambisonic /
             # unsupported channel layout streams).
@@ -589,9 +613,10 @@ def convert_detected_projection_to_equirectangular(
         )
 
     logger.info(
-        "[CONVERSION] Converting %s → equirectangular via ffmpeg (projection=%s, audio=with_aac).",
+        "[CONVERSION] Converting %s → equirectangular via ffmpeg (projection=%s, encoder=%s, audio=with_aac).",
         os.path.basename(video_path),
         projection_type,
+        detect_ffmpeg_h264_encoder(),
     )
     logger.debug("[CONVERSION] Command: %s", " ".join(cmd))
 

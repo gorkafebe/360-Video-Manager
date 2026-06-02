@@ -1,4 +1,5 @@
 import os
+import json
 import subprocess
 import tempfile
 from typing import Any, Callable, Dict, List, Optional
@@ -6,9 +7,148 @@ from typing import Any, Callable, Dict, List, Optional
 import cv2
 import numpy as np
 
+from .projection_conversion import detect_ffmpeg_h264_encoder
+
 
 class FrameExtractorError(Exception):
     """Excepción base para errores de extracción de frames."""
+
+
+def _can_decode_with_opencv(video_path: str) -> bool:
+    cap_test = cv2.VideoCapture(video_path)
+    can_decode = cap_test.isOpened()
+    if can_decode:
+        ret, _ = cap_test.read()
+        can_decode = bool(ret)
+    cap_test.release()
+    return can_decode
+
+
+def _run_ffprobe_json(video_path: str) -> Dict[str, Any]:
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-print_format",
+        "json",
+        "-show_streams",
+        "-show_format",
+        video_path,
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+    if proc.returncode != 0:
+        stderr = (proc.stderr or "").strip()
+        raise FrameExtractorError(f"ffprobe falló: {stderr or 'sin detalle'}")
+    try:
+        return json.loads(proc.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise FrameExtractorError("ffprobe devolvió JSON inválido") from exc
+
+
+def _parse_ratio(value: Optional[str]) -> float:
+    if not value:
+        return 0.0
+    txt = str(value).strip()
+    if "/" in txt:
+        left, right = txt.split("/", 1)
+        try:
+            den = float(right)
+            if den == 0:
+                return 0.0
+            return float(left) / den
+        except ValueError:
+            return 0.0
+    try:
+        return float(txt)
+    except ValueError:
+        return 0.0
+
+
+def probe_video_stream(video_path: str) -> Dict[str, Any]:
+    """Devuelve metadatos de stream principal usando ffprobe cuando está disponible."""
+    metadata: Dict[str, Any] = {
+        "path": video_path,
+        "codec_name": None,
+        "pix_fmt": None,
+        "width": 0,
+        "height": 0,
+        "fps": 0.0,
+        "duration": 0.0,
+        "total_frames": 0,
+        "source": "unavailable",
+    }
+    try:
+        raw = _run_ffprobe_json(video_path)
+    except Exception:
+        return metadata
+
+    streams = raw.get("streams") or []
+    video_stream = next((s for s in streams if s.get("codec_type") == "video"), {}) or {}
+    fmt = raw.get("format") or {}
+    fps = _parse_ratio(video_stream.get("avg_frame_rate")) or _parse_ratio(video_stream.get("r_frame_rate"))
+    duration = 0.0
+    try:
+        duration = float(video_stream.get("duration") or fmt.get("duration") or 0.0)
+    except (TypeError, ValueError):
+        duration = 0.0
+    total_frames = 0
+    try:
+        total_frames = int(video_stream.get("nb_frames") or 0)
+    except (TypeError, ValueError):
+        total_frames = 0
+    if total_frames <= 0 and duration > 0 and fps > 0:
+        total_frames = max(1, int(round(duration * fps)))
+
+    metadata.update(
+        {
+            "codec_name": video_stream.get("codec_name"),
+            "pix_fmt": video_stream.get("pix_fmt"),
+            "width": int(video_stream.get("width") or 0),
+            "height": int(video_stream.get("height") or 0),
+            "fps": float(fps),
+            "duration": float(duration),
+            "total_frames": int(total_frames),
+            "source": "ffprobe",
+        }
+    )
+    return metadata
+
+
+def _extract_single_frame_ffmpeg(video_path: str, timestamp_seconds: float, timeout: int = 25) -> Optional[np.ndarray]:
+    cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-ss",
+        f"{max(0.0, float(timestamp_seconds)):.6f}",
+        "-i",
+        video_path,
+        "-frames:v",
+        "1",
+        "-f",
+        "image2pipe",
+        "-vcodec",
+        "mjpeg",
+        "-",
+    ]
+    proc = subprocess.run(cmd, capture_output=True, timeout=timeout)
+    if proc.returncode != 0 or not proc.stdout:
+        return None
+    buffer = np.frombuffer(proc.stdout, dtype=np.uint8)
+    frame = cv2.imdecode(buffer, cv2.IMREAD_COLOR)
+    if frame is None or frame.size == 0:
+        return None
+    return frame
+
+
+def _compute_even_positions(start_frame: int, end_frame: int, num_frames: int) -> List[int]:
+    if num_frames <= 1:
+        return [start_frame]
+    return [
+        start_frame + int(i * (end_frame - start_frame) / (num_frames - 1))
+        for i in range(num_frames)
+    ]
 
 
 def convert_video_codec(video_path: str) -> str:
@@ -16,14 +156,7 @@ def convert_video_codec(video_path: str) -> str:
     if not os.path.exists(video_path):
         raise FrameExtractorError(f"El archivo de vídeo no existe: {video_path}")
 
-    cap_test = cv2.VideoCapture(video_path)
-    can_decode = cap_test.isOpened()
-    if can_decode:
-        ret, _ = cap_test.read()
-        can_decode = bool(ret)
-    cap_test.release()
-
-    if can_decode:
+    if _can_decode_with_opencv(video_path):
         return video_path
 
     try:
@@ -43,6 +176,7 @@ def convert_video_codec(video_path: str) -> str:
     ) as tmp:
         compat_path = tmp.name
 
+    encoder = detect_ffmpeg_h264_encoder()
     cmd = [
         "ffmpeg",
         "-hide_banner",
@@ -50,20 +184,22 @@ def convert_video_codec(video_path: str) -> str:
         "error",
         "-y",
         "-hwaccel",
-        "none",
+        "auto",
         "-i",
         video_path,
         "-c:v",
-        "libx264",
-        "-preset",
-        "veryfast",
-        "-crf",
-        "23",
-        "-pix_fmt",
-        "yuv420p",
-        "-an",
-        compat_path,
+        encoder,
     ]
+    if encoder == "libx264":
+        cmd.extend(["-preset", "veryfast", "-crf", "23"])
+    cmd.extend(
+        [
+            "-pix_fmt",
+            "yuv420p",
+            "-an",
+            compat_path,
+        ]
+    )
 
     try:
         proc = subprocess.run(cmd, capture_output=True, timeout=900)
@@ -112,14 +248,26 @@ def extract_main_frames(
         raise FrameExtractorError(f"Modo de extracción inválido: {modo_extraccion}")
 
     try:
-        video_path_procesado = convert_video_codec(video_path)
-        cap = cv2.VideoCapture(video_path_procesado)
-        if not cap.isOpened():
-            raise FrameExtractorError(f"No se pudo abrir el vídeo: {video_path_procesado}")
+        video_path_procesado = video_path
+        cap = cv2.VideoCapture(video_path)
+        can_decode_opencv = cap.isOpened()
+        first_read_ok = False
+        if can_decode_opencv:
+            first_read_ok, _ = cap.read()
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            can_decode_opencv = bool(first_read_ok)
 
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        duration = total_frames / fps if fps > 0 else 0
+        metadata = probe_video_stream(video_path)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) if can_decode_opencv else int(metadata.get("total_frames", 0))
+        fps = float(cap.get(cv2.CAP_PROP_FPS)) if can_decode_opencv else float(metadata.get("fps", 0.0))
+        if total_frames <= 0:
+            total_frames = int(metadata.get("total_frames", 0))
+        if fps <= 0:
+            fps = float(metadata.get("fps", 0.0))
+        duration = (total_frames / fps) if (fps > 0 and total_frames > 0) else float(metadata.get("duration", 0.0))
+        if total_frames <= 0:
+            cap.release()
+            raise FrameExtractorError("No se pudo determinar el total de frames del vídeo")
         video_name = os.path.splitext(os.path.basename(video_path))[0]
 
         frame_positions: List[int] = []
@@ -130,12 +278,7 @@ def extract_main_frames(
             usable = end_frame - start_frame + 1
             if num_frames > usable:
                 num_frames = usable
-            for i in range(num_frames):
-                if num_frames > 1:
-                    frame_pos = start_frame + int(i * (end_frame - start_frame) / (num_frames - 1))
-                else:
-                    frame_pos = start_frame
-                frame_positions.append(frame_pos)
+            frame_positions = _compute_even_positions(start_frame, end_frame, num_frames)
         else:
             if fps <= 0:
                 raise FrameExtractorError("No se pudo obtener FPS válido del vídeo")
@@ -146,9 +289,21 @@ def extract_main_frames(
 
         frames: List[np.ndarray] = []
         frame_metadata: List[Dict[str, Any]] = []
+        fallback_ffmpeg_frames = 0
         for idx, frame_pos in enumerate(frame_positions, start=1):
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_pos)
-            ret, frame = cap.read()
+            frame = None
+            ret = False
+            if can_decode_opencv:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_pos)
+                ret, frame = cap.read()
+            if not ret or frame is None:
+                if fps > 0:
+                    frame = _extract_single_frame_ffmpeg(video_path, frame_pos / fps)
+                elif duration > 0 and total_frames > 1:
+                    frame = _extract_single_frame_ffmpeg(video_path, (frame_pos / (total_frames - 1)) * duration)
+                ret = frame is not None
+                if ret:
+                    fallback_ffmpeg_frames += 1
             if ret:
                 frames.append(frame.copy())
                 frame_metadata.append({
@@ -180,6 +335,7 @@ def extract_main_frames(
             "frames_metadata": frame_metadata,
             "frames_paths": [],
             "message": f"Extraídos {len(frames)} frames en memoria",
+            "fallback_ffmpeg_frames": fallback_ffmpeg_frames,
         }
 
         if guardar_frames:
@@ -226,9 +382,15 @@ def extract_secondary_frames(
 ) -> List[List[Dict[str, Any]]]:
     """Extrae secuencias temporales 3-frame alrededor de cada posición principal."""
     secuencias: List[List[Dict[str, Any]]] = []
+    metadata = probe_video_stream(video_path)
+    fps = float(metadata.get("fps", 0.0))
+    duration = float(metadata.get("duration", 0.0))
     cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        return secuencias
+    cap_ok = cap.isOpened()
+    if cap_ok:
+        probe_ret, _ = cap.read()
+        cap_ok = bool(probe_ret)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
     for pos in frame_positions:
         posiciones_ventana = sorted({
@@ -238,8 +400,17 @@ def extract_secondary_frames(
         })
         seq: List[Dict[str, Any]] = []
         for p in posiciones_ventana:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, p)
-            ret, frame = cap.read()
+            frame = None
+            ret = False
+            if cap_ok:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, p)
+                ret, frame = cap.read()
+            if (not ret or frame is None) and total_frames > 0:
+                if fps > 0:
+                    frame = _extract_single_frame_ffmpeg(video_path, p / fps)
+                elif duration > 0 and total_frames > 1:
+                    frame = _extract_single_frame_ffmpeg(video_path, (p / (total_frames - 1)) * duration)
+                ret = frame is not None
             if ret:
                 seq.append({"position": p, "frame": frame.copy(), "valid": True})
             else:

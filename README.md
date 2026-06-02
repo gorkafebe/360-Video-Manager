@@ -181,8 +181,8 @@ source URL / local file
     ├─ Stage 2: yt-dlp download                   → data/downloads/
     │           (skipped for local-file jobs)
     │
-    ├─ Stage 3: Codec normalisation               single ffmpeg pass
-    │           (video_io.convert_video_codec)     skipped when OpenCV can decode directly
+    ├─ Stage 3: Codec compatibility telemetry     ffprobe metadata + decode strategy log
+    │           (no full-file transcode by default; legacy full pass is feature-flagged)
     │
     ├─ Stage 4: Preview frame extraction          → data/downloads/previews/
     │           (core/preview_frames.py)           JPEG, evenly-spaced, skips head/tail
@@ -305,6 +305,7 @@ root. Defaults shown are the values used when a variable is not set.
 | `VPD_ENABLE_GEOMETRY_EVIDENCE` | `false` | Enable geometry-evidence fusion from robust homography fitting |
 | `VPD_GEOMETRY_EVIDENCE_WEIGHT` | `0.20` | Blend weight for geometry evidence in EAC-vs-cubic scoring |
 | `VPD_MOTION_ROLLOUT_PROFILE` | `high_accuracy` | Motion profile: `baseline`, `robust`, `high_accuracy` |
+| `VPD_FORCE_FULL_CODEC_NORMALIZATION` | `false` | Re-enable legacy full-file pre-normalization transcode before detection |
 
 ### Motion rollout profile behavior
 

@@ -1,4 +1,5 @@
 import sys
+import tempfile
 import types
 import unittest
 from unittest.mock import patch
@@ -22,7 +23,7 @@ sys.modules.setdefault("cv2", fake_cv2)
 sys.modules.setdefault("numpy", fake_numpy)
 
 from detector.pipeline import _resolve_motion_feature_flags, run_detection_with_retries
-from workflows.unified_pipeline import _stage_detect_projection
+from workflows.unified_pipeline import JobOptions, _stage_detect_projection, process_video_job
 
 
 class DetectionRetryTests(unittest.TestCase):
@@ -346,6 +347,57 @@ class MotionFeatureFlagResolutionTests(unittest.TestCase):
         )
         self.assertEqual(flags["flow_algorithm"], "tvl1")
         self.assertEqual(flags["flow_fallback_chain"][0], "tvl1")
+
+
+class UnifiedPipelineNormalizationModeTests(unittest.TestCase):
+    @patch("workflows.unified_pipeline._stage_preview_frames", return_value=[])
+    @patch(
+        "workflows.unified_pipeline._stage_detect_projection",
+        return_value={"projection_type": "equirectangular", "confidence": 0.9, "stats": {}},
+    )
+    @patch("workflows.unified_pipeline._stage_normalize_codec", return_value="/tmp/compat.mp4")
+    def test_detection_path_skips_full_normalization_by_default(
+        self,
+        mock_normalize,
+        _mock_detect,
+        _mock_preview,
+    ):
+        with tempfile.NamedTemporaryFile(suffix=".mp4") as tmp_video:
+            result = process_video_job(
+                JobOptions(
+                    local_video_path=tmp_video.name,
+                    convert_if_needed=False,
+                    save_manifest=False,
+                )
+            )
+        self.assertTrue(result.success)
+        mock_normalize.assert_not_called()
+        self.assertEqual(result.normalized_video_path, tmp_video.name)
+
+    @patch("workflows.unified_pipeline._stage_preview_frames", return_value=[])
+    @patch(
+        "workflows.unified_pipeline._stage_detect_projection",
+        return_value={"projection_type": "equirectangular", "confidence": 0.9, "stats": {}},
+    )
+    @patch("workflows.unified_pipeline._stage_normalize_codec", return_value="/tmp/compat.mp4")
+    def test_force_flag_keeps_legacy_full_normalization(
+        self,
+        mock_normalize,
+        _mock_detect,
+        _mock_preview,
+    ):
+        with tempfile.NamedTemporaryFile(suffix=".mp4") as tmp_video:
+            result = process_video_job(
+                JobOptions(
+                    local_video_path=tmp_video.name,
+                    convert_if_needed=False,
+                    save_manifest=False,
+                    force_full_codec_normalization=True,
+                )
+            )
+        self.assertTrue(result.success)
+        mock_normalize.assert_called_once_with(tmp_video.name)
+        self.assertEqual(result.normalized_video_path, "/tmp/compat.mp4")
 
 
 if __name__ == "__main__":

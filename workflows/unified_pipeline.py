@@ -35,6 +35,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 import os
+import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
@@ -97,6 +98,9 @@ class JobOptions:
         Whether to save a JSON job manifest (default: True).
     progress_callback
         Optional callable for download-progress notifications.
+    force_full_codec_normalization
+        Force the legacy full-file codec normalization transcode before
+        detection. Disabled by default to prefer sampled frame extraction.
     """
 
     source_url: Optional[str] = None
@@ -115,6 +119,7 @@ class JobOptions:
     upload_tags: Optional[List[str]] = None
     save_manifest: bool = True
     progress_callback: Optional[Callable] = None
+    force_full_codec_normalization: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -197,6 +202,26 @@ def _stage_normalize_codec(video_path: str) -> str:
         return normalised
     except DetectorFEError as exc:
         raise FrameExtractorError(f"Codec normalisation failed: {exc}") from exc
+
+
+def _log_codec_telemetry(video_path: str, context: str) -> Dict[str, Any]:
+    from detector.video_io import probe_video_stream
+
+    metadata = probe_video_stream(video_path)
+    logger.info(
+        "[CODEC][%s] path=%s codec=%s pix_fmt=%s %sx%s fps=%.3f duration=%.2fs frames=%s source=%s",
+        context,
+        video_path,
+        metadata.get("codec_name") or "unknown",
+        metadata.get("pix_fmt") or "unknown",
+        metadata.get("width") or 0,
+        metadata.get("height") or 0,
+        float(metadata.get("fps") or 0.0),
+        float(metadata.get("duration") or 0.0),
+        metadata.get("total_frames") or 0,
+        metadata.get("source") or "unknown",
+    )
+    return metadata
 
 
 def _stage_preview_frames(
@@ -341,6 +366,9 @@ def process_video_job(options: JobOptions) -> JobResult:
     """
     cfg = get_settings()
     cfg.ensure_runtime_dirs()
+    force_full_codec_normalization = bool(
+        options.force_full_codec_normalization or getattr(cfg, "force_full_codec_normalization", False)
+    )
 
     result = JobResult(
         job_id=new_job_id(),
@@ -348,6 +376,16 @@ def process_video_job(options: JobOptions) -> JobResult:
     )
 
     output_dir = options.output_dir or cfg.downloads_dir
+    stage_timings: Dict[str, float] = {}
+
+    def _time_stage(stage_name: str, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        started = time.perf_counter()
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            elapsed = time.perf_counter() - started
+            stage_timings[stage_name] = elapsed
+            logger.info("[TIMING] %s=%.3fs", stage_name, elapsed)
 
     try:
         # ------------------------------------------------------------------ #
@@ -360,7 +398,7 @@ def process_video_job(options: JobOptions) -> JobResult:
             result.original_video_path = video_path
             logger.info("Using local video: %s", video_path)
         else:
-            url, title = _stage_search_and_resolve(options)
+            url, title = _time_stage("search_resolve", _stage_search_and_resolve, options)
             result.source_url = url
             if title:
                 result.source_title = title
@@ -368,30 +406,53 @@ def process_video_job(options: JobOptions) -> JobResult:
             # ------------------------------------------------------------------ #
             # Stage 2: Download
             # ------------------------------------------------------------------ #
-            video_path = _stage_download(url, output_dir, options.progress_callback)
+            video_path = _time_stage(
+                "download",
+                _stage_download,
+                url,
+                output_dir,
+                options.progress_callback,
+            )
             result.original_video_path = video_path
             if not result.source_title:
                 result.source_title = os.path.splitext(os.path.basename(video_path))[0]
 
+        _log_codec_telemetry(video_path, "source")
+
         # ------------------------------------------------------------------ #
-        # Stage 3: Codec normalisation (single pass; no duplicate conversion)
+        # Stage 3: Codec normalisation (feature-flagged full transcode fallback)
         # ------------------------------------------------------------------ #
-        normalized_path = _stage_normalize_codec(video_path)
+        normalized_path = video_path
+        if force_full_codec_normalization:
+            normalized_path = _time_stage("normalize_codec", _stage_normalize_codec, video_path)
+        else:
+            logger.info(
+                "[CODEC] Full-file normalization disabled; detection will use sampled extraction fallback when needed."
+            )
         result.normalized_video_path = normalized_path
+        _log_codec_telemetry(normalized_path, "analysis_input")
 
         # ------------------------------------------------------------------ #
         # Stage 4: Preview frame extraction (UI / thumbnails)
         # ------------------------------------------------------------------ #
-        result.preview_frame_paths = _stage_preview_frames(
-            normalized_path, options.preview_frames, output_dir
+        result.preview_frame_paths = _time_stage(
+            "preview_frames",
+            _stage_preview_frames,
+            normalized_path,
+            options.preview_frames,
+            output_dir,
         )
 
         # ------------------------------------------------------------------ #
         # Stage 5: Projection detection
         # ------------------------------------------------------------------ #
         debug_dir = cfg.debug_output_dir
-        detection = _stage_detect_projection(
-            normalized_path, options.num_detection_frames, debug_dir
+        detection = _time_stage(
+            "detect_projection",
+            _stage_detect_projection,
+            normalized_path,
+            options.num_detection_frames,
+            debug_dir,
         )
         result.projection_type = detection.get("projection_type", "unknown")
         result.confidence = float(detection.get("confidence", 0.0))
@@ -404,7 +465,9 @@ def process_video_job(options: JobOptions) -> JobResult:
         # ------------------------------------------------------------------ #
         converted_path: Optional[str] = None
         if options.convert_if_needed:
-            converted_path = _stage_convert_to_equirectangular(
+            converted_path = _time_stage(
+                "convert_equirectangular",
+                _stage_convert_to_equirectangular,
                 video_path=normalized_path,
                 projection_type=result.projection_type,
                 confidence=result.confidence,
@@ -412,6 +475,8 @@ def process_video_job(options: JobOptions) -> JobResult:
                 confidence_threshold=options.confidence_threshold,
             )
         result.converted_video_path = converted_path
+        if converted_path:
+            _log_codec_telemetry(converted_path, "converted_output")
 
         # ------------------------------------------------------------------ #
         # Stage 7: Upload (optional)
@@ -424,7 +489,9 @@ def process_video_job(options: JobOptions) -> JobResult:
                     or result.source_title
                     or os.path.splitext(os.path.basename(asset_to_upload))[0]
                 )
-                result.upload_result = _stage_upload(
+                result.upload_result = _time_stage(
+                    "upload",
+                    _stage_upload,
                     video_path=asset_to_upload,
                     title=upload_title,
                     description=options.upload_description,
@@ -437,6 +504,12 @@ def process_video_job(options: JobOptions) -> JobResult:
                 logger.warning("Upload requested but no valid asset path found; skipping.")
 
         result.success = True
+        if stage_timings:
+            logger.info(
+                "[TIMING] total=%.3fs detail=%s",
+                sum(stage_timings.values()),
+                ", ".join(f"{name}:{duration:.3f}s" for name, duration in stage_timings.items()),
+            )
         logger.info("Job %s completed successfully.", result.job_id)
 
     except WorkflowError as exc:

@@ -1,5 +1,6 @@
 import logging
 import os
+import time
 from typing import Any, Dict, List, Optional, Set
 
 import cv2
@@ -34,7 +35,13 @@ from .region_validation import is_region_valid
 from .equirectangular_detection import aggregate_equirectangular_evidence, compute_frame_equirectangular_evidence
 from .projection_conversion import convert_detected_projection_to_equirectangular
 from .stereo_detection import detect_stereo
-from .video_io import FrameExtractorError, convert_video_codec, extract_main_frames, extract_secondary_frames
+from .video_io import (
+    FrameExtractorError,
+    convert_video_codec,
+    extract_main_frames,
+    extract_secondary_frames,
+    probe_video_stream,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -1452,6 +1459,16 @@ def run_detection_with_retries(
     num_frames: int = 10,
     debug_base_dir: Optional[str] = None,
 ) -> tuple[Dict[str, Any], Dict[str, str]]:
+    stream_meta = probe_video_stream(video_path)
+    logger.info(
+        "[DETECTION][codec] path=%s codec=%s %sx%s fps=%.3f frames=%s",
+        video_path,
+        stream_meta.get("codec_name") or "unknown",
+        stream_meta.get("width") or 0,
+        stream_meta.get("height") or 0,
+        float(stream_meta.get("fps") or 0.0),
+        stream_meta.get("total_frames") or 0,
+    )
     gaussian_kernel_size = 5
     gaussian_sigma = 1.2
     motion_flags = _resolve_motion_feature_flags()
@@ -1468,6 +1485,7 @@ def run_detection_with_retries(
     previous_motion_signal: Optional[float] = None
 
     for attempt_idx, attempt_plan in enumerate(retry_plan):
+        attempt_started = time.perf_counter()
         attempt = attempt_idx + 1
         current_num_frames = attempt_plan["num_frames"]
         paso_sec = attempt_plan["paso_frames_secundarios"]
@@ -1494,6 +1512,13 @@ def run_detection_with_retries(
             log_success_fn=log_success,
             log_discard_fn=log_discard,
         )
+        fallback_ffmpeg_frames = int(frame_result.get("fallback_ffmpeg_frames", 0))
+        if fallback_ffmpeg_frames > 0:
+            logger.info(
+                "[RETRY][attempt=%d] sampled fallback frames via ffmpeg=%d",
+                attempt,
+                fallback_ffmpeg_frames,
+            )
 
         detection_result = run_detection_pipeline(
             video_path,
@@ -1543,9 +1568,11 @@ def run_detection_with_retries(
 
         if detection_result.get("motion_reliable"):
             logger.info(f"Intento {attempt}: clasificación confiable alcanzada. Fin de reintentos.")
+            logger.info("[RETRY][attempt=%d] elapsed=%.3fs", attempt, time.perf_counter() - attempt_started)
             break
         if detection_result.get("projection_type") == "equirectangular":
             logger.info(f"Intento {attempt}: clasificación temprana EQUIRECTANGULAR alcanzada. Fin de reintentos.")
+            logger.info("[RETRY][attempt=%d] elapsed=%.3fs", attempt, time.perf_counter() - attempt_started)
             break
         if low_motion_cause and previous_motion_signal is not None and motion_signal_gain < 0.005:
             logger.warning(
@@ -1553,6 +1580,7 @@ def run_detection_with_retries(
                 f"(actual={current_motion_signal:.4f}, ganancia={motion_signal_gain:.4f}). "
                 "Cierre anticipado de reintentos."
             )
+            logger.info("[RETRY][attempt=%d] elapsed=%.3fs", attempt, time.perf_counter() - attempt_started)
             break
         if attempt < len(retry_plan):
             if low_motion_cause:
@@ -1575,6 +1603,11 @@ def run_detection_with_retries(
                 f"Reintentando con mayor separación temporal."
             )
         previous_motion_signal = current_motion_signal
+        logger.info(
+            "[RETRY][attempt=%d] elapsed=%.3fs",
+            attempt,
+            time.perf_counter() - attempt_started,
+        )
 
     return final_detection, final_debug_context
 

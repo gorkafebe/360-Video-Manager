@@ -42,9 +42,9 @@ from detector.video_io import extract_main_frames
 
 
 class _FakeFrame:
-    def __init__(self, name: str, shape=(8, 8, 3)):
+    def __init__(self, name: str, shape=None):
         self.name = name
-        self.shape = shape
+        self.shape = shape or (8, 8, 3)
 
     def copy(self):
         return self

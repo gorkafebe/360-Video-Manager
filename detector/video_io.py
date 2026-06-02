@@ -7,6 +7,8 @@ from typing import Any, Callable, Dict, List, Optional
 import cv2
 import numpy as np
 
+from .projection_conversion import detect_ffmpeg_h264_encoder
+
 
 class FrameExtractorError(Exception):
     """Excepción base para errores de extracción de frames."""
@@ -112,23 +114,6 @@ def probe_video_stream(video_path: str) -> Dict[str, Any]:
     return metadata
 
 
-def _detect_ffmpeg_h264_encoder() -> str:
-    try:
-        proc = subprocess.run(
-            ["ffmpeg", "-hide_banner", "-encoders"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except Exception:
-        return "libx264"
-    text = (proc.stdout or "") + "\n" + (proc.stderr or "")
-    for candidate in ("h264_nvenc", "h264_qsv", "h264_videotoolbox", "h264_amf", "libx264"):
-        if candidate in text:
-            return candidate
-    return "libx264"
-
-
 def _extract_single_frame_ffmpeg(video_path: str, timestamp_seconds: float, timeout: int = 25) -> Optional[np.ndarray]:
     cmd = [
         "ffmpeg",
@@ -191,7 +176,7 @@ def convert_video_codec(video_path: str) -> str:
     ) as tmp:
         compat_path = tmp.name
 
-    encoder = _detect_ffmpeg_h264_encoder()
+    encoder = detect_ffmpeg_h264_encoder()
     cmd = [
         "ffmpeg",
         "-hide_banner",

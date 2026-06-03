@@ -58,6 +58,20 @@ def _get_api_url(api_url: Optional[str] = None) -> str:
     return url
 
 
+def _get_upload_request_timeout() -> tuple[int, int]:
+    """Return an upload timeout tuple suitable for large multipart bodies.
+
+    ``requests``/``urllib3`` applies the first timeout value while sending the
+    request body, so the regular 10-second connect timeout is too small for
+    slow or large video uploads.
+    """
+    from config.settings import get_settings
+
+    cfg = get_settings()
+    upload_timeout = max(_CONNECT_TIMEOUT, int(getattr(cfg, "cms_upload_timeout", 900)))
+    return (upload_timeout, upload_timeout)
+
+
 def _build_endpoint(api_url: str, path: str) -> str:
     """Build an absolute endpoint URL from *api_url* and a *path* suffix.
 
@@ -323,7 +337,7 @@ def upload_video_asset(
                 files=files,
                 data=data,
                 auth=auth,
-                timeout=_REQUEST_TIMEOUT,
+                timeout=_get_upload_request_timeout(),
             )
 
         if response.status_code not in (200, 201):

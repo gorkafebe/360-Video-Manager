@@ -130,6 +130,7 @@ CMS_API_URL=https://your-cms.example.com/api/v1/media
 CMS_USER=admin
 CMS_PASSWORD=secret
 CMS_TOKEN=csrf_token_here
+CMS_UPLOAD_TIMEOUT=900
 
 # ── Optional directory overrides ─────────────────────────────────────────────
 DOWNLOADS_DIR=data/downloads
@@ -285,6 +286,7 @@ root. Defaults shown are the values used when a variable is not set.
 | `CMS_USER` | `$USER` | MediaCMS username for HTTP Basic Auth |
 | `CMS_PASSWORD` | — | MediaCMS password |
 | `CMS_TOKEN` | — | MediaCMS CSRF token |
+| `CMS_UPLOAD_TIMEOUT` | `900` | Socket timeout in seconds for MediaCMS uploads |
 | `VPD_PROJECT_ROOT` | auto-detected | Override the project root directory |
 | `DOWNLOADS_DIR` | `data/downloads` | Download and conversion output directory |
 | `VPD_FRAMES_OUTPUT_DIR` | `data/frames` | Detector analysis frame output |

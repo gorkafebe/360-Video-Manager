@@ -11,6 +11,7 @@ CMS_API_URL             MediaCMS API endpoint, e.g. https://cms.example.com/api/
 CMS_USER                MediaCMS username for HTTP basic auth.
 CMS_PASSWORD            MediaCMS password for HTTP basic auth.
 CMS_TOKEN               MediaCMS CSRF token.
+CMS_UPLOAD_TIMEOUT      Socket timeout in seconds for MediaCMS video uploads.
 
 VPD_PROJECT_ROOT        Override the auto-detected project root.
 VPD_FRAMES_OUTPUT_DIR   Directory for detector analysis frame output.
@@ -147,6 +148,7 @@ class Settings:
         )
         self.cms_password: Optional[str] = os.getenv("CMS_PASSWORD") or None
         self.cms_token: Optional[str] = os.getenv("CMS_TOKEN") or None
+        self.cms_upload_timeout: int = _env_int("CMS_UPLOAD_TIMEOUT", 900)
 
         # ---- Detector thresholds ----
         self.min_frames_analyzed: int = _env_int("VPD_MIN_FRAMES_ANALYZED", 4)

@@ -6,6 +6,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, mock_open, patch
 
+import requests
+
 from core.uploader import (
     _build_endpoint,
     create_category,
@@ -156,6 +158,7 @@ class UploadMetadataTests(unittest.TestCase):
             cms_token=None,
             cms_user=None,
             cms_password=None,
+            cms_upload_timeout=900,
         )
 
     @patch("config.settings.get_settings")
@@ -222,6 +225,7 @@ class UploadMetadataTests(unittest.TestCase):
         self.assertIn("data", call_kwargs)
         self.assertEqual(call_kwargs["data"]["category"], "cat-1")
         self.assertEqual(call_kwargs["data"]["tags"], "anxiety,breathing")
+        self.assertEqual(call_kwargs["timeout"], (900, 900))
 
     @patch("config.settings.get_settings")
     @patch("requests.post")
@@ -253,6 +257,54 @@ class UploadMetadataTests(unittest.TestCase):
         call_kwargs = mock_post.call_args.kwargs
         # int 123 and string "123" collapse to the same final tag after normalisation.
         self.assertEqual(call_kwargs["data"]["tags"], "anxiety,123,12.5")
+
+    @patch("config.settings.get_settings")
+    @patch("requests.post")
+    @patch("os.path.exists", return_value=True)
+    def test_upload_uses_configured_upload_timeout(
+        self,
+        _mock_exists,
+        mock_post,
+        mock_get_settings,
+    ):
+        self.fake_settings.cms_upload_timeout = 1200
+        mock_get_settings.return_value = self.fake_settings
+        mock_resp = MagicMock(status_code=201)
+        mock_resp.json.return_value = {
+            "friendly_token": "tok-555",
+            "media_url": "https://cms.example.com/media/tok-555",
+        }
+        mock_post.return_value = mock_resp
+
+        with patch("builtins.open", mock_open(read_data=b"video-bytes")):
+            result = upload_video_asset(
+                video_path="/tmp/video.mp4",
+                title="Session Upload",
+                api_url="https://cms.example.com/api/v1/media",
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(mock_post.call_args.kwargs["timeout"], (1200, 1200))
+
+    @patch("config.settings.get_settings")
+    @patch("requests.post")
+    @patch("os.path.exists", return_value=True)
+    def test_upload_raises_mediacms_error_on_timeout(
+        self,
+        _mock_exists,
+        mock_post,
+        mock_get_settings,
+    ):
+        mock_get_settings.return_value = self.fake_settings
+        mock_post.side_effect = requests.Timeout("timed out")
+
+        with patch("builtins.open", mock_open(read_data=b"video-bytes")):
+            with self.assertRaisesRegex(Exception, "Upload timed out"):
+                upload_video_asset(
+                    video_path="/tmp/video.mp4",
+                    title="Session Upload",
+                    api_url="https://cms.example.com/api/v1/media",
+                )
 
     @patch("config.settings.get_settings")
     @patch("core.uploader.add_to_playlist")

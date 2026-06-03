@@ -450,6 +450,53 @@ class MotionGateRatioFallbackTests(unittest.TestCase):
         cap.get.return_value = float(frame_count)
         return cap
 
+    def _make_line_response(self, has_line: bool, fft_confirmed: bool = True, confidence: float = 0.6) -> dict:
+        """Return a single detect_horizontal_line mock response."""
+        return {
+            "has_horizontal_line": has_line,
+            "debug_line_info": {},
+            "fft_confirmed": fft_confirmed,
+            "fft_confidence": confidence,
+            "seam_center": 100,
+            "has_vertical_line": False,
+            "vertical_seam_center": None,
+        }
+
+    def _make_equi_aggregate(self) -> dict:
+        """Return an aggregate_equirectangular_evidence mock response with no evidence."""
+        return {
+            "confidence": 0.0,
+            "is_strong_evidence": False,
+            "usable_frames": 6,
+            "strong_frames": 0,
+            "mean_score": 0.0,
+            "median_score": 0.0,
+            "final_score": 0.0,
+            "reason": "insufficient_evidence",
+        }
+
+    def _make_stereo_result(self) -> dict:
+        """Return a detect_stereo mock response indicating no stereo."""
+        return {
+            "is_stereo": False,
+            "frames_evaluados": 0,
+            "frames_match": 0,
+            "frames_no_match": 0,
+            "avg_similarity": 0.0,
+            "avg_bhattacharyya": 1.0,
+            "avg_edge_similarity": 0.0,
+            "avg_combined_score": 0.0,
+            "match_ratio": 0.0,
+            "min_match_ratio": 0.60,
+            "longest_mismatch_streak": 0,
+            "stability_ratio": 0.0,
+            "min_frames_required": 3,
+            "min_stability_ratio": 0.5,
+            "edge_similarity_threshold": 0.3,
+            "bhattacharyya_threshold": 0.30,
+            "frame_details": [],
+        }
+
     @patch("detector.pipeline.cv2.VideoCapture")
     @patch("detector.pipeline._classify_non_equirectangular")
     @patch("detector.pipeline.detect_stereo")
@@ -482,47 +529,17 @@ class MotionGateRatioFallbackTests(unittest.TestCase):
 
         # 6 non-black frames, 5 have a horizontal line (ratio=0.833 >= 0.50)
         mock_is_black.return_value = False
-        has_line_responses = [True, True, True, True, True, False]
         mock_detect_line.side_effect = [
-            {"has_horizontal_line": v, "debug_line_info": {}, "fft_confirmed": True, "fft_confidence": 0.6,
-             "seam_center": 100, "has_vertical_line": False, "vertical_seam_center": None}
-            for v in has_line_responses
+            self._make_line_response(v) for v in [True, True, True, True, True, False]
         ]
         mock_compute_equi.return_value = {"confidence": 0.8, "is_equirectangular": False}
-        mock_aggregate_equi.return_value = {
-            "confidence": 0.0,
-            "is_strong_evidence": False,
-            "usable_frames": 6,
-            "strong_frames": 0,
-            "mean_score": 0.0,
-            "median_score": 0.0,
-            "final_score": 0.0,
-            "reason": "insufficient_evidence",
-        }
+        mock_aggregate_equi.return_value = self._make_equi_aggregate()
 
         # secondary sequences: provide one sequence per main frame
         fake_seq = [{"position": i * 10 + 1, "frame": object(), "valid": True} for i in range(3)]
         mock_extract_secondary.return_value = [fake_seq] * 6
 
-        mock_detect_stereo.return_value = {
-            "is_stereo": False,
-            "frames_evaluados": 0,
-            "frames_match": 0,
-            "frames_no_match": 0,
-            "avg_similarity": 0.0,
-            "avg_bhattacharyya": 1.0,
-            "avg_edge_similarity": 0.0,
-            "avg_combined_score": 0.0,
-            "match_ratio": 0.0,
-            "min_match_ratio": 0.60,
-            "longest_mismatch_streak": 0,
-            "stability_ratio": 0.0,
-            "min_frames_required": 3,
-            "min_stability_ratio": 0.5,
-            "edge_similarity_threshold": 0.3,
-            "bhattacharyya_threshold": 0.30,
-            "frame_details": [],
-        }
+        mock_detect_stereo.return_value = self._make_stereo_result()
 
         mock_classify.return_value = {
             "classification": "eac",
@@ -591,42 +608,13 @@ class MotionGateRatioFallbackTests(unittest.TestCase):
 
         mock_video_capture.return_value = self._make_fake_cap()
         mock_is_black.return_value = False
-        has_line_responses = [True, True, False, False, False, False]
         mock_detect_line.side_effect = [
-            {"has_horizontal_line": v, "debug_line_info": {}, "fft_confirmed": False, "fft_confidence": 0.4,
-             "seam_center": 100, "has_vertical_line": False, "vertical_seam_center": None}
-            for v in has_line_responses
+            self._make_line_response(v, fft_confirmed=False, confidence=0.4)
+            for v in [True, True, False, False, False, False]
         ]
         mock_compute_equi.return_value = {"confidence": 0.4, "is_equirectangular": False}
-        mock_aggregate_equi.return_value = {
-            "confidence": 0.0,
-            "is_strong_evidence": False,
-            "usable_frames": 6,
-            "strong_frames": 0,
-            "mean_score": 0.0,
-            "median_score": 0.0,
-            "final_score": 0.0,
-            "reason": "insufficient_evidence",
-        }
-        mock_detect_stereo.return_value = {
-            "is_stereo": False,
-            "frames_evaluados": 0,
-            "frames_match": 0,
-            "frames_no_match": 0,
-            "avg_similarity": 0.0,
-            "avg_bhattacharyya": 1.0,
-            "avg_edge_similarity": 0.0,
-            "avg_combined_score": 0.0,
-            "match_ratio": 0.0,
-            "min_match_ratio": 0.60,
-            "longest_mismatch_streak": 0,
-            "stability_ratio": 0.0,
-            "min_frames_required": 3,
-            "min_stability_ratio": 0.5,
-            "edge_similarity_threshold": 0.3,
-            "bhattacharyya_threshold": 0.30,
-            "frame_details": [],
-        }
+        mock_aggregate_equi.return_value = self._make_equi_aggregate()
+        mock_detect_stereo.return_value = self._make_stereo_result()
         mock_extract_secondary.return_value = [[]] * 6
 
         frames = [MagicMock(**{"shape": (720, 1440, 3)}) for _ in range(6)]

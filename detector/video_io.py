@@ -7,7 +7,7 @@ from typing import Any, Callable, Dict, List, Optional
 import cv2
 import numpy as np
 
-from .projection_conversion import detect_ffmpeg_h264_encoder
+from .projection_conversion import detect_ffmpeg_h264_encoder, _is_hardware_encoder_runtime_failure
 
 
 class FrameExtractorError(Exception):
@@ -201,8 +201,20 @@ def convert_video_codec(video_path: str) -> str:
         ]
     )
 
+    def _run_codec_command(command):
+        return subprocess.run(command, capture_output=True, timeout=900)
+
     try:
-        proc = subprocess.run(cmd, capture_output=True, timeout=900)
+        proc = _run_codec_command(cmd)
+        if proc.returncode != 0 and encoder != "libx264":
+            stderr = proc.stderr.decode("utf-8", errors="ignore")
+            if _is_hardware_encoder_runtime_failure(stderr, encoder):
+                fallback_cmd = list(cmd)
+                idx = fallback_cmd.index("-c:v") + 1
+                fallback_cmd[idx] = "libx264"
+                if "-preset" not in fallback_cmd:
+                    fallback_cmd[idx + 1:idx + 1] = ["-preset", "veryfast", "-crf", "23"]
+                proc = _run_codec_command(fallback_cmd)
         if proc.returncode != 0:
             stderr = proc.stderr.decode("utf-8", errors="ignore")
             raise FrameExtractorError(f"Fallback ffmpeg falló: {stderr}")

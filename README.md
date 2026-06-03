@@ -238,7 +238,10 @@ layouts. The conversion layer:
 1. Attempts conversion with audio re-encoded to AAC (`-c:a aac -b:a 192k`).
 2. On an ambisonic / unsupported-layout ffmpeg error, retries automatically
    with audio dropped (`-an`). The resulting file has no audio track.
-3. A conversion failure never fails the overall job — detection results are
+3. If a hardware H.264 encoder is listed but not usable at runtime
+   (for example NVENC without CUDA runtime), conversion retries automatically
+   with `libx264`.
+4. A conversion failure never fails the overall job — detection results are
    always returned.
 
 ---

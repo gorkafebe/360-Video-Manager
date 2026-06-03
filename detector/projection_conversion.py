@@ -115,7 +115,7 @@ _HARDWARE_ENCODER_RUNTIME_FAILURE_SIGNALS: tuple = (
     "no device available",
     "unsupported device",
     "device creation failed",
-    "failed to initialise encoder",
+    "failed to initialize encoder",
     "error while opening encoder",
     "error initializing output stream",
 )
@@ -192,6 +192,15 @@ def _is_hardware_encoder_runtime_failure(stderr: str, encoder: str) -> bool:
     if "error while opening encoder" in s or "error initializing output stream" in s:
         return any(sig in s for sig in _HARDWARE_BACKEND_CONTEXT_SIGNALS)
     return False
+
+
+def _extract_video_encoder(cmd: List[str]) -> Optional[str]:
+    """Return the value passed to ``-c:v`` in *cmd*, if present."""
+    try:
+        idx = cmd.index("-c:v")
+    except ValueError:
+        return None
+    return cmd[idx + 1] if idx + 1 < len(cmd) else None
 
 
 # ---------------------------------------------------------------------------
@@ -702,14 +711,14 @@ def convert_detected_projection_to_equirectangular(
         "[CONVERSION] Converting %s → equirectangular via ffmpeg (projection=%s, encoder=%s, audio=with_aac).",
         os.path.basename(video_path),
         projection_type,
-        cmd[cmd.index("-c:v") + 1] if "-c:v" in cmd else "copy",
+        _extract_video_encoder(cmd) or "copy",
     )
     logger.debug("[CONVERSION] Command: %s", " ".join(cmd))
 
     ffmpeg_result = run_ffmpeg_command(cmd)
 
     # --- Hardware-encoder runtime fallback --------------------------------- #
-    selected_encoder = cmd[cmd.index("-c:v") + 1] if "-c:v" in cmd else "copy"
+    selected_encoder = _extract_video_encoder(cmd) or "copy"
     if (
         not ffmpeg_result["success"]
         and _is_hardware_encoder_runtime_failure(ffmpeg_result["stderr"], selected_encoder)
@@ -720,12 +729,13 @@ def convert_detected_projection_to_equirectangular(
             selected_encoder,
         )
         try:
-            cmd = build_ffmpeg_command_for_projection(
+            fallback_cmd = build_ffmpeg_command_for_projection(
                 video_path,
                 output_path,
                 projection_type,
                 video_encoder="libx264",
             )
+            cmd = fallback_cmd
             ffmpeg_result = run_ffmpeg_command(cmd)
         except ValueError as exc:
             logger.error("[CONVERSION] Cannot build libx264 fallback command: %s", exc)
@@ -733,7 +743,7 @@ def convert_detected_projection_to_equirectangular(
                 projection_type=projection_type,
                 input_path=video_path,
                 output_path=output_path,
-                cmd=cmd,
+                cmd=None,
                 error=str(exc),
                 stderr=ffmpeg_result["stderr"],
                 stdout=ffmpeg_result["stdout"],
@@ -755,7 +765,7 @@ def convert_detected_projection_to_equirectangular(
                 output_path,
                 projection_type,
                 drop_audio=True,
-                video_encoder=cmd[cmd.index("-c:v") + 1] if "-c:v" in cmd else None,
+                video_encoder=_extract_video_encoder(cmd),
             )
         except ValueError as exc:
             logger.error("[CONVERSION] Cannot build video-only command: %s", exc)

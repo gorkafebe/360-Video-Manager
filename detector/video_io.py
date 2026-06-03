@@ -201,20 +201,22 @@ def convert_video_codec(video_path: str) -> str:
         ]
     )
 
-    def _run_codec_command(command):
-        return subprocess.run(command, capture_output=True, timeout=900)
-
     try:
-        proc = _run_codec_command(cmd)
+        proc = subprocess.run(cmd, capture_output=True, timeout=900)
         if proc.returncode != 0 and encoder != "libx264":
             stderr = proc.stderr.decode("utf-8", errors="ignore")
             if _is_hardware_encoder_runtime_failure(stderr, encoder):
                 fallback_cmd = list(cmd)
                 idx = fallback_cmd.index("-c:v") + 1
                 fallback_cmd[idx] = "libx264"
+                insert_args = []
                 if "-preset" not in fallback_cmd:
-                    fallback_cmd[idx + 1:idx + 1] = ["-preset", "veryfast", "-crf", "23"]
-                proc = _run_codec_command(fallback_cmd)
+                    insert_args.extend(["-preset", "veryfast"])
+                if "-crf" not in fallback_cmd:
+                    insert_args.extend(["-crf", "23"])
+                if insert_args:
+                    fallback_cmd[idx + 1:idx + 1] = insert_args
+                proc = subprocess.run(fallback_cmd, capture_output=True, timeout=900)
         if proc.returncode != 0:
             stderr = proc.stderr.decode("utf-8", errors="ignore")
             raise FrameExtractorError(f"Fallback ffmpeg falló: {stderr}")

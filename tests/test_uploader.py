@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, mock_open, patch
 
 import requests
 
+from utils.exceptions import MediaCMSError
 from core.uploader import (
     _build_endpoint,
     create_category,
@@ -299,7 +300,7 @@ class UploadMetadataTests(unittest.TestCase):
         mock_post.side_effect = requests.Timeout("timed out")
 
         with patch("builtins.open", mock_open(read_data=b"video-bytes")):
-            with self.assertRaisesRegex(Exception, "Upload timed out"):
+            with self.assertRaisesRegex(MediaCMSError, "Upload timed out"):
                 upload_video_asset(
                     video_path="/tmp/video.mp4",
                     title="Session Upload",

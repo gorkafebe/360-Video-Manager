@@ -53,6 +53,22 @@ class ProjectionConversionCommandTests(unittest.TestCase):
         vf = cmd[cmd.index("-vf") + 1]
         self.assertIn("v360=c3x2:equirect", vf)
         self.assertIn("pad=ceil(iw/2)*2:ceil(ih/2)*2:(ow-iw)/2:(oh-ih)/2", vf)
+        # Hardware acceleration must NOT be present when the v360 software filter
+        # is used: hardware-decoded frames stay in device memory and cannot be
+        # consumed by the software filter, which would cause ffmpeg to create an
+        # empty output file and exit with an error.
+        self.assertNotIn("-hwaccel", cmd)
+
+    def test_build_ffmpeg_command_stream_copy_uses_hwaccel(self):
+        """Stream-copy path (no v360 filter) may safely use hardware acceleration."""
+        with patch("detector.projection_conversion.detect_ffmpeg_h264_encoder", return_value="libx264"):
+            cmd = build_ffmpeg_command_for_projection(
+                "/tmp/input.mp4",
+                "/tmp/output.mp4",
+                # equirectangular has no v360 filter → stream-copy path
+                "equirectangular",
+            )
+        self.assertNotIn("-vf", cmd)
         self.assertIn("-hwaccel", cmd)
         self.assertIn("auto", cmd)
 
@@ -100,6 +116,48 @@ class ProjectionConversionRetryTests(unittest.TestCase):
         self.assertEqual(mock_run_ffmpeg_command.call_count, 1)
         called_cmd = mock_run_ffmpeg_command.call_args_list[0].args[0]
         self.assertNotIn("-an", called_cmd)
+
+
+    @patch("detector.projection_conversion.run_ffmpeg_command")
+    @patch("detector.projection_conversion.is_ffmpeg_available", return_value=True)
+    def test_empty_output_file_removed_on_ffmpeg_failure(
+        self,
+        _mock_ffmpeg_available,
+        mock_run_ffmpeg_command,
+    ):
+        """When ffmpeg fails, any empty output file it created must be removed."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_path = os.path.join(tmpdir, "input.mp4")
+            with open(input_path, "wb"):
+                pass
+
+            # Pre-create the empty output file to simulate what ffmpeg does
+            # with -y before it fails: it opens/truncates the output file first.
+            from detector.projection_conversion import build_equirectangular_output_path
+            output_path = build_equirectangular_output_path(input_path, output_dir=tmpdir)
+            with open(output_path, "wb"):
+                pass  # create zero-byte file
+
+            mock_run_ffmpeg_command.return_value = {
+                "success": False,
+                "returncode": 1,
+                "stdout": "",
+                "stderr": "v360: some filter error",
+                "error": "ffmpeg exited with code 1",
+            }
+
+            result = convert_detected_projection_to_equirectangular(
+                video_path=input_path,
+                projection_type="eac",
+                output_dir=tmpdir,
+            )
+
+            self.assertFalse(result["success"])
+            self.assertIsNotNone(result["output_path"])
+            self.assertFalse(
+                os.path.exists(output_path),
+                "Empty output file should have been removed after ffmpeg failure",
+            )
 
 
 if __name__ == "__main__":

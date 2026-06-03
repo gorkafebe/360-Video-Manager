@@ -693,12 +693,16 @@ def convert_detected_projection_to_equirectangular(
         # ffmpeg opens (truncates) the output file before it starts encoding.
         # When the command fails the output file is left empty on disk.  Remove
         # it so that callers do not encounter a zero-byte artefact.
-        if os.path.exists(output_path) and os.path.getsize(output_path) == 0:
-            try:
+        # Use a single os.stat() call to avoid a TOCTOU race between existence
+        # and size checks.
+        try:
+            if os.stat(output_path).st_size == 0:
                 os.remove(output_path)
                 logger.debug("[CONVERSION] Removed empty output file: %s", output_path)
-            except OSError as exc:
-                logger.warning("[CONVERSION] Could not remove empty output file %s: %s", output_path, exc)
+        except FileNotFoundError:
+            pass  # file was never created — nothing to clean up
+        except OSError as exc:
+            logger.warning("[CONVERSION] Could not remove empty output file %s: %s", output_path, exc)
         return _make_failure_result(
             projection_type=projection_type,
             input_path=video_path,

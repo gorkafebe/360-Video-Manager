@@ -1285,7 +1285,24 @@ def run_detection_pipeline(
                         "Clasificación temprana: STEREO_EQUI "
                         f"(hist_similarity={stereo_avg_similarity:.4f}, threshold={stereo_hist_threshold:.4f})."
                     )
-                elif frames_with_line >= min_frames_with_line_required:
+                elif (
+                    frames_with_line >= min_frames_with_line_required
+                    or (
+                        frames_analyzed > 0
+                        and frames_with_line / frames_analyzed >= 0.50
+                        and frames_with_line >= 2
+                    )
+                ):
+                    if frames_with_line < min_frames_with_line_required:
+                        line_ratio = frames_with_line / frames_analyzed if frames_analyzed > 0 else 0.0
+                        logger.info(
+                            "[MOTION-GATE] Ratio fallback: frames_with_line=%d < required=%d "
+                            "(frames_analyzed=%d, line_ratio=%.0f%%) → proceeding via ratio gate",
+                            frames_with_line,
+                            min_frames_with_line_required,
+                            frames_analyzed,
+                            line_ratio * 100,
+                        )
                     if secuencias_secundarias:
                         secuencias_con_linea = [
                             secuencias_secundarias[i]
@@ -1347,6 +1364,15 @@ def run_detection_pipeline(
                         motion_reliability_reason = "no_secondary_sequences"
                     confidence = ratio
                 else:
+                    line_ratio = frames_with_line / frames_analyzed if frames_analyzed > 0 else 0.0
+                    logger.warning(
+                        "[MOTION-GATE] Skipping motion analysis: "
+                        "frames_with_line=%d < required=%d (frames_analyzed=%d, line_ratio=%.0f%%)",
+                        frames_with_line,
+                        min_frames_with_line_required,
+                        frames_analyzed,
+                        line_ratio * 100,
+                    )
                     motion_reliable = False
                     motion_reliability_reason = (
                         f"insufficient_structural_frames:{frames_with_line}<{min_frames_with_line_required}"
@@ -1494,17 +1520,14 @@ def _build_detection_retry_plan(num_frames: int, max_retries: int = 2) -> List[D
             break
 
     secondary_plan = [5, 9, 13]
-    min_line_plan = [7, 6, 4]
     retry_plan: List[Dict[str, int]] = []
     for idx, frame_count in enumerate(frame_plan):
+        min_lines_required = max(2, int(frame_count * 0.55))
         retry_plan.append(
             {
                 "num_frames": frame_count,
                 "paso_frames_secundarios": secondary_plan[min(idx, len(secondary_plan) - 1)],
-                "min_frames_with_line_required": max(
-                    1,
-                    min(frame_count, min_line_plan[min(idx, len(min_line_plan) - 1)]),
-                ),
+                "min_frames_with_line_required": min_lines_required,
             }
         )
     return retry_plan

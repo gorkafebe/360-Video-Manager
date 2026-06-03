@@ -27,6 +27,7 @@ sys.modules.setdefault("cv2", fake_cv2)
 sys.modules.setdefault("numpy", fake_numpy)
 
 from detector.projection_conversion import (
+    _is_hardware_encoder_runtime_failure,
     _is_audio_failure,
     build_ffmpeg_command_for_projection,
     build_v360_filter_for_projection,
@@ -74,6 +75,14 @@ class ProjectionConversionCommandTests(unittest.TestCase):
 
 
 class ProjectionConversionRetryTests(unittest.TestCase):
+    def test_hardware_encoder_runtime_failure_detected_for_nvenc_cuda_error(self):
+        stderr = "[h264_nvenc @ 0x1] Cannot load libcuda.so.1\nError while opening encoder"
+        self.assertTrue(_is_hardware_encoder_runtime_failure(stderr, "h264_nvenc"))
+
+    def test_hardware_encoder_runtime_failure_not_detected_for_libx264(self):
+        stderr = "Error while opening encoder for output stream #0:0"
+        self.assertFalse(_is_hardware_encoder_runtime_failure(stderr, "libx264"))
+
     def test_is_audio_failure_false_for_video_dimension_error(self):
         stderr = (
             "[libx264 @ 0x1] height not divisible by 2 (3840x1707)\n"
@@ -81,6 +90,55 @@ class ProjectionConversionRetryTests(unittest.TestCase):
             "for output stream #0:0"
         )
         self.assertFalse(_is_audio_failure(stderr))
+
+    @patch("detector.projection_conversion.run_ffmpeg_command")
+    @patch("detector.projection_conversion.is_ffmpeg_available", return_value=True)
+    @patch("detector.projection_conversion.detect_ffmpeg_h264_encoder", return_value="h264_nvenc")
+    def test_hw_encoder_failure_retries_with_libx264(
+        self,
+        _mock_detect_encoder,
+        _mock_ffmpeg_available,
+        mock_run_ffmpeg_command,
+    ):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_path = os.path.join(tmpdir, "input.mp4")
+            with open(input_path, "wb"):
+                pass
+
+            output_path = os.path.join(tmpdir, "input_equirectangular.mp4")
+            with open(output_path, "wb") as f:
+                f.write(b"x")
+
+            mock_run_ffmpeg_command.side_effect = [
+                {
+                    "success": False,
+                    "returncode": 255,
+                    "stdout": "",
+                    "stderr": "[h264_nvenc @ 0x1] Cannot load libcuda.so.1\nError while opening encoder",
+                    "error": "ffmpeg exited with code 255",
+                },
+                {
+                    "success": True,
+                    "returncode": 0,
+                    "stdout": "",
+                    "stderr": "",
+                    "error": None,
+                },
+            ]
+
+            result = convert_detected_projection_to_equirectangular(
+                video_path=input_path,
+                projection_type="eac",
+                output_dir=tmpdir,
+            )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(mock_run_ffmpeg_command.call_count, 2)
+        first_cmd = mock_run_ffmpeg_command.call_args_list[0].args[0]
+        second_cmd = mock_run_ffmpeg_command.call_args_list[1].args[0]
+        self.assertIn("h264_nvenc", first_cmd)
+        self.assertIn("libx264", second_cmd)
+        self.assertEqual(result["output_path"], output_path)
 
     @patch("detector.projection_conversion.run_ffmpeg_command")
     @patch("detector.projection_conversion.is_ffmpeg_available", return_value=True)

@@ -106,11 +106,32 @@ _SKIP_PROJECTION_TYPES = frozenset({"equirectangular", "stereo_equi"})
 _CONVERTIBLE_PROJECTION_TYPES = frozenset(_V360_INPUT_FORMAT.keys())
 
 _HW_ENCODER_ORDER = ("h264_nvenc", "h264_qsv", "h264_videotoolbox", "h264_amf", "libx264")
+_HW_ENCODERS = frozenset({"h264_nvenc", "h264_qsv", "h264_videotoolbox", "h264_amf"})
+
+_HARDWARE_ENCODER_RUNTIME_FAILURE_SIGNALS: tuple = (
+    "cannot load libcuda",
+    "cuda is not available",
+    "cannot init cuda",
+    "no device available",
+    "unsupported device",
+    "device creation failed",
+    "failed to initialize encoder",
+    "error while opening encoder",
+    "error initializing output stream",
+)
+
+_HARDWARE_BACKEND_CONTEXT_SIGNALS: tuple = (
+    "nvenc",
+    "qsv",
+    "videotoolbox",
+    "amf",
+    "cuda",
+)
 
 
 @lru_cache(maxsize=1)
 def detect_ffmpeg_h264_encoder() -> str:
-    """Detect best available ffmpeg H.264 encoder, preferring hardware backends."""
+    """Detect best usable ffmpeg H.264 encoder, preferring hardware backends."""
     try:
         proc = subprocess.run(
             ["ffmpeg", "-hide_banner", "-encoders"],
@@ -122,9 +143,64 @@ def detect_ffmpeg_h264_encoder() -> str:
         return "libx264"
     text = (proc.stdout or "") + "\n" + (proc.stderr or "")
     for candidate in _HW_ENCODER_ORDER:
-        if candidate in text:
+        if candidate in text and _is_encoder_runtime_usable(candidate):
             return candidate
     return "libx264"
+
+
+def _is_encoder_runtime_usable(encoder: str) -> bool:
+    """Return True if *encoder* appears usable for a tiny encode in this runtime."""
+    if encoder == "libx264":
+        return True
+    try:
+        proc = subprocess.run(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=16x16:r=1",
+                "-frames:v",
+                "1",
+                "-c:v",
+                encoder,
+                "-f",
+                "null",
+                "-",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        return proc.returncode == 0
+    except Exception:
+        return False
+
+
+def _is_hardware_encoder_runtime_failure(stderr: str, encoder: str) -> bool:
+    """Return True when *stderr* indicates hardware encoder runtime failure."""
+    if encoder not in _HW_ENCODERS:
+        return False
+    s = (stderr or "").lower()
+    if not s:
+        return False
+    if any(sig in s for sig in _HARDWARE_ENCODER_RUNTIME_FAILURE_SIGNALS):
+        return True
+    if "error while opening encoder" in s or "error initializing output stream" in s:
+        return any(sig in s for sig in _HARDWARE_BACKEND_CONTEXT_SIGNALS)
+    return False
+
+
+def _extract_video_encoder(cmd: List[str]) -> Optional[str]:
+    """Return the value passed to ``-c:v`` in *cmd*, if present."""
+    try:
+        idx = cmd.index("-c:v")
+    except ValueError:
+        return None
+    return cmd[idx + 1] if idx + 1 < len(cmd) else None
 
 
 # ---------------------------------------------------------------------------
@@ -265,6 +341,7 @@ def build_ffmpeg_command_for_projection(
     output_path: str,
     projection_type: str,
     drop_audio: bool = False,
+    video_encoder: Optional[str] = None,
 ) -> List[str]:
     """Build an ffmpeg command list to convert *input_path* to equirectangular.
 
@@ -312,7 +389,7 @@ def build_ffmpeg_command_for_projection(
             f"No ffmpeg conversion strategy defined for projection type: {projection_type!r}"
         )
 
-    selected_encoder = detect_ffmpeg_h264_encoder()
+    selected_encoder = video_encoder or detect_ffmpeg_h264_encoder()
 
     if v360_filter:
         # Geometric remapping required — use software decoding so that the
@@ -634,11 +711,43 @@ def convert_detected_projection_to_equirectangular(
         "[CONVERSION] Converting %s → equirectangular via ffmpeg (projection=%s, encoder=%s, audio=with_aac).",
         os.path.basename(video_path),
         projection_type,
-        detect_ffmpeg_h264_encoder(),
+        _extract_video_encoder(cmd) or "copy",
     )
     logger.debug("[CONVERSION] Command: %s", " ".join(cmd))
 
     ffmpeg_result = run_ffmpeg_command(cmd)
+
+    # --- Hardware-encoder runtime fallback --------------------------------- #
+    selected_encoder = _extract_video_encoder(cmd) or "copy"
+    if (
+        not ffmpeg_result["success"]
+        and _is_hardware_encoder_runtime_failure(ffmpeg_result["stderr"], selected_encoder)
+        and selected_encoder != "libx264"
+    ):
+        logger.warning(
+            "[CONVERSION] Encoder %s failed at runtime; retrying with libx264.",
+            selected_encoder,
+        )
+        try:
+            fallback_cmd = build_ffmpeg_command_for_projection(
+                video_path,
+                output_path,
+                projection_type,
+                video_encoder="libx264",
+            )
+            cmd = fallback_cmd
+            ffmpeg_result = run_ffmpeg_command(cmd)
+        except ValueError as exc:
+            logger.error("[CONVERSION] Cannot build libx264 fallback command: %s", exc)
+            return _make_failure_result(
+                projection_type=projection_type,
+                input_path=video_path,
+                output_path=output_path,
+                cmd=None,
+                error=str(exc),
+                stderr=ffmpeg_result["stderr"],
+                stdout=ffmpeg_result["stdout"],
+            )
 
     # --- Audio-failure retry ------------------------------------------------ #
     # 360° videos commonly carry ambisonic audio (first-order / higher-order
@@ -652,7 +761,11 @@ def convert_detected_projection_to_equirectangular(
         )
         try:
             cmd_no_audio = build_ffmpeg_command_for_projection(
-                video_path, output_path, projection_type, drop_audio=True
+                video_path,
+                output_path,
+                projection_type,
+                drop_audio=True,
+                video_encoder=_extract_video_encoder(cmd),
             )
         except ValueError as exc:
             logger.error("[CONVERSION] Cannot build video-only command: %s", exc)

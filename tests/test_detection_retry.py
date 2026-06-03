@@ -24,6 +24,7 @@ sys.modules.setdefault("numpy", fake_numpy)
 
 from detector.pipeline import _resolve_motion_feature_flags, run_detection_with_retries
 from workflows.unified_pipeline import JobOptions, _stage_detect_projection, process_video_job
+from core.models import UploadResult
 
 
 class DetectionRetryTests(unittest.TestCase):
@@ -398,6 +399,45 @@ class UnifiedPipelineNormalizationModeTests(unittest.TestCase):
         self.assertTrue(result.success)
         mock_normalize.assert_called_once_with(tmp_video.name)
         self.assertEqual(result.normalized_video_path, "/tmp/compat.mp4")
+
+
+class UnifiedPipelineUploadSelectionTests(unittest.TestCase):
+    @patch(
+        "workflows.unified_pipeline._stage_upload",
+        return_value=UploadResult(success=True, friendly_token="tok"),
+    )
+    @patch(
+        "workflows.unified_pipeline._stage_detect_projection",
+        return_value={"projection_type": "eac", "confidence": 0.95, "stats": {}},
+    )
+    @patch("workflows.unified_pipeline._stage_convert_to_equirectangular")
+    @patch("workflows.unified_pipeline._stage_preview_frames", return_value=[])
+    @patch("workflows.unified_pipeline._log_codec_telemetry", return_value={})
+    def test_upload_prefers_converted_path_when_available(
+        self,
+        _mock_codec,
+        _mock_preview,
+        mock_convert,
+        _mock_detect,
+        mock_upload,
+    ):
+        with tempfile.NamedTemporaryFile(suffix=".mp4") as tmp_video, tempfile.NamedTemporaryFile(
+            suffix=".mp4"
+        ) as tmp_converted:
+            mock_convert.return_value = tmp_converted.name
+            result = process_video_job(
+                JobOptions(
+                    local_video_path=tmp_video.name,
+                    output_dir="/tmp",
+                    upload=True,
+                    convert_if_needed=True,
+                    save_manifest=False,
+                )
+            )
+        self.assertTrue(result.success)
+        self.assertEqual(result.converted_video_path, tmp_converted.name)
+        mock_upload.assert_called_once()
+        self.assertEqual(mock_upload.call_args.kwargs["video_path"], tmp_converted.name)
 
 
 from detector.pipeline import _build_detection_retry_plan

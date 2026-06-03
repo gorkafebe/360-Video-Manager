@@ -47,6 +47,9 @@ from typing import Optional
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+CMS_UPLOAD_TIMEOUT_DEFAULT = 900
+
+
 def _parse_dotenv(dotenv_path: str) -> None:
     """Minimal .env parser used when python-dotenv is unavailable."""
     if not os.path.exists(dotenv_path):
@@ -148,7 +151,10 @@ class Settings:
         )
         self.cms_password: Optional[str] = os.getenv("CMS_PASSWORD") or None
         self.cms_token: Optional[str] = os.getenv("CMS_TOKEN") or None
-        self.cms_upload_timeout: int = _env_int("CMS_UPLOAD_TIMEOUT", 900)
+        self.cms_upload_timeout: int = _env_int(
+            "CMS_UPLOAD_TIMEOUT",
+            CMS_UPLOAD_TIMEOUT_DEFAULT,
+        )
 
         # ---- Detector thresholds ----
         self.min_frames_analyzed: int = _env_int("VPD_MIN_FRAMES_ANALYZED", 4)

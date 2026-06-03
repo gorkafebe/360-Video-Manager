@@ -65,10 +65,13 @@ def _get_upload_request_timeout() -> tuple[int, int]:
     request body, so the regular 10-second connect timeout is too small for
     slow or large video uploads.
     """
-    from config.settings import get_settings
+    from config.settings import CMS_UPLOAD_TIMEOUT_DEFAULT, get_settings
 
     cfg = get_settings()
-    upload_timeout = max(_CONNECT_TIMEOUT, int(getattr(cfg, "cms_upload_timeout", 900)))
+    upload_timeout = max(
+        _CONNECT_TIMEOUT,
+        int(getattr(cfg, "cms_upload_timeout", CMS_UPLOAD_TIMEOUT_DEFAULT)),
+    )
     return (upload_timeout, upload_timeout)
 
 

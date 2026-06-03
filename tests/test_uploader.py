@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, mock_open, patch
 
 import requests
 
+from config.settings import CMS_UPLOAD_TIMEOUT_DEFAULT
 from utils.exceptions import MediaCMSError
 from core.uploader import (
     _build_endpoint,
@@ -159,7 +160,7 @@ class UploadMetadataTests(unittest.TestCase):
             cms_token=None,
             cms_user=None,
             cms_password=None,
-            cms_upload_timeout=900,
+            cms_upload_timeout=CMS_UPLOAD_TIMEOUT_DEFAULT,
         )
 
     @patch("config.settings.get_settings")

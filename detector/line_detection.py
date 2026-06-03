@@ -7,6 +7,50 @@ import numpy as np
 from .preprocessing import prepare_frame_for_line_detection
 
 
+MIN_SEARCH_BAND_HALF = 2
+
+
+def _compute_candidate_quality(
+    *,
+    line_length: float,
+    total_span: float,
+    min_coverage_px: float,
+    strong_coverage_px: float,
+    distance_from_center: float,
+    center_tolerance: float,
+    slope: float,
+    max_slope: float,
+    continuity_ratio: float,
+) -> Dict[str, float]:
+    """Return quality components and final score for a seam candidate."""
+    coverage_norm = float(np.clip(line_length / max(min_coverage_px, 1.0), 0.0, 2.0)) / 2.0
+    strong_coverage_norm = float(np.clip(line_length / max(strong_coverage_px, 1.0), 0.0, 1.0))
+    center_score = 1.0 - float(
+        np.clip(distance_from_center / max(center_tolerance, 1.0), 0.0, 1.0)
+    )
+    slope_score = 1.0 - float(np.clip(slope / max(max_slope, 1e-6), 0.0, 1.0))
+    continuity_score = float(np.clip(continuity_ratio, 0.0, 1.0))
+    span_score = float(np.clip(line_length / max(total_span, 1.0), 0.0, 1.0))
+
+    quality_score = (
+        0.30 * coverage_norm
+        + 0.20 * strong_coverage_norm
+        + 0.20 * center_score
+        + 0.15 * slope_score
+        + 0.10 * continuity_score
+        + 0.05 * span_score
+    )
+    return {
+        "coverage_norm": float(coverage_norm),
+        "strong_coverage_norm": float(strong_coverage_norm),
+        "center_score": float(center_score),
+        "slope_score": float(slope_score),
+        "continuity_score": float(continuity_score),
+        "span_score": float(span_score),
+        "quality_score": float(np.clip(quality_score, 0.0, 1.0)),
+    }
+
+
 def _verify_line_with_fft(gray_roi: np.ndarray, min_dominance: float = 0.10) -> Dict[str, Any]:
     """Confirms a detected horizontal line via spectral analysis of the band ROI.
 
@@ -51,9 +95,11 @@ def _verify_line_with_fft(gray_roi: np.ndarray, min_dominance: float = 0.10) -> 
 def detect_horizontal_line(
     frame: np.ndarray,
     center_tolerance_ratio: float = 0.02,
-    band_ratio: float = 0.08,
+    search_band_ratio: float = 0.02,
     max_slope: float = 0.05,
     min_coverage_ratio: float = 0.20,
+    min_quality_score: float = 0.62,
+    fallback_min_quality_score: float = 0.78,
 ) -> Dict[str, Any]:
     """Detecta línea horizontal centrada sin efectos secundarios."""
     try:
@@ -68,7 +114,7 @@ def detect_horizontal_line(
         min_line_length_required = float(hough_min_length)
         min_coverage_px = float(width) * min_coverage_ratio  # minimum merged span
         strong_coverage_px = float(width) * 0.40  # span that overrides FFT requirement
-        band_half = int(height * band_ratio / 4.0)
+        band_half = max(MIN_SEARCH_BAND_HALF, int(round(height * float(search_band_ratio) * 0.5)))
         y_top = max(0, int(center_y) - band_half)
         y_bottom = min(height, int(center_y) + band_half)
         roi = gray[y_top:y_bottom, :]
@@ -78,6 +124,9 @@ def detect_horizontal_line(
         debug_line_info: Dict[str, Any] = {
             "center_y": center_y,
             "tolerance": center_tolerance,
+            "search_band_top": int(y_top),
+            "search_band_bottom": int(y_bottom),
+            "search_band_ratio": float(search_band_ratio),
             "total_lines": 0,
             "candidate_lines": [],
             "horizontal_lines": [],
@@ -253,6 +302,10 @@ def detect_horizontal_line(
 
                 total_coverage = float(sum(max(0, e - s) for s, e in merged))
                 mean_y = float(np.mean([s["line_center_y"] for s in segs]))
+                largest_merged = float(max((e - s) for s, e in merged)) if merged else 0.0
+                continuity_ratio = (
+                    float(largest_merged / total_coverage) if total_coverage > 0 else 0.0
+                )
                 if total_coverage > best_coverage:
                     best_coverage = total_coverage
                     best_candidate = {
@@ -264,6 +317,7 @@ def detect_horizontal_line(
                         "distance_from_center": abs(mean_y - center_y),
                         "line_length": total_coverage,
                         "slope": float(np.mean([s["slope"] for s in segs])),
+                        "continuity_ratio": float(continuity_ratio),
                     }
 
             # Coverage gate: Hough candidate must span min_coverage_ratio of frame width
@@ -299,6 +353,7 @@ def detect_horizontal_line(
                             "distance_from_center": float(abs(line_center_y - center_y)),
                             "line_length": float(line_length),
                             "slope": float(slope),
+                            "continuity_ratio": 1.0,
                             "from_lsd": True,
                         }
                         if best_candidate is None or candidate["line_length"] > best_candidate["line_length"]:
@@ -335,6 +390,7 @@ def detect_horizontal_line(
                             "distance_from_center": float(abs(fitted_y_abs - center_y)),
                             "line_length": float(width),
                             "slope": float(abs(vy / vx)) if abs(vx) > 1e-9 else 0.0,
+                            "continuity_ratio": 1.0,
                             "from_fitline": True,
                         }
 
@@ -369,26 +425,68 @@ def detect_horizontal_line(
             fft_check = _verify_line_with_fft(roi)
             fft_confirmed = bool(fft_check["confirmed"])
 
+            continuity_ratio = float(best_candidate.get("continuity_ratio", 1.0))
+            quality = _compute_candidate_quality(
+                line_length=float(best_candidate["line_length"]),
+                total_span=float(width),
+                min_coverage_px=float(min_coverage_px),
+                strong_coverage_px=float(strong_coverage_px),
+                distance_from_center=float(best_candidate["distance_from_center"]),
+                center_tolerance=float(center_tolerance),
+                slope=float(best_candidate.get("slope", 0.0)),
+                max_slope=float(max_slope),
+                continuity_ratio=continuity_ratio,
+            )
+
             # Quality gate: require FFT confirmation OR high non-fallback Hough coverage.
             # Fallback candidates (LSD / fitLine) always require FFT to be confirmed because
             # they can be constructed from noisy edge clusters without real segment evidence.
             from_fallback = bool(
                 best_candidate.get("from_lsd", False) or best_candidate.get("from_fitline", False)
             )
+            strict_centered = bool(
+                best_candidate["distance_from_center"] <= (float(center_tolerance) * 0.65)
+            )
+            slope_tight = bool(best_candidate.get("slope", 0.0) <= (float(max_slope) * 0.70))
+            continuity_ok = bool(continuity_ratio >= 0.70)
+            quality_ok = bool(quality["quality_score"] >= float(min_quality_score))
+            fallback_quality_ok = bool(
+                quality["quality_score"] >= float(fallback_min_quality_score)
+            )
             high_coverage = bool(
                 best_candidate["line_length"] >= strong_coverage_px and not from_fallback
             )
-            detection_confirmed = fft_confirmed or high_coverage
+            if from_fallback:
+                detection_confirmed = bool(
+                    fft_confirmed
+                    and fallback_quality_ok
+                    and strict_centered
+                    and slope_tight
+                    and continuity_ok
+                )
+            else:
+                detection_confirmed = bool(
+                    (fft_confirmed and quality_ok and strict_centered and continuity_ok)
+                    or (high_coverage and quality_ok and strict_centered and slope_tight and continuity_ok)
+                )
 
             debug_line_info["quality_gate"] = {
                 "fft_confirmed": fft_confirmed,
                 "from_fallback": from_fallback,
                 "high_coverage": high_coverage,
+                "strict_centered": strict_centered,
+                "slope_tight": slope_tight,
+                "continuity_ok": continuity_ok,
+                "quality_ok": quality_ok,
+                "fallback_quality_ok": fallback_quality_ok,
                 "detection_confirmed": detection_confirmed,
                 "line_length": float(best_candidate["line_length"]),
                 "min_coverage_px": float(min_coverage_px),
                 "strong_coverage_px": float(strong_coverage_px),
+                "quality_score": float(quality["quality_score"]),
+                "continuity_ratio": float(continuity_ratio),
             }
+            debug_line_info["quality_metrics"] = quality
 
             if not detection_confirmed:
                 # Candidate found but failed quality gate — preserve debug info, skip detection
@@ -418,6 +516,7 @@ def detect_horizontal_line(
                     "distance_from_center": float(best_candidate["distance_from_center"]),
                     "angle_deg": angle_deg,
                     "length": float(best_candidate["line_length"]),
+                    "quality_score": float(quality["quality_score"]),
                 },
             }
 
@@ -487,9 +586,11 @@ def _verify_vertical_line_with_fft(gray_roi: np.ndarray, min_dominance: float = 
 def detect_vertical_line(
     frame: np.ndarray,
     center_tolerance_ratio: float = 0.02,
-    band_ratio: float = 0.08,
+    search_band_ratio: float = 0.02,
     max_slope: float = 0.05,
     min_coverage_ratio: float = 0.20,
+    min_quality_score: float = 0.62,
+    fallback_min_quality_score: float = 0.78,
 ) -> Dict[str, Any]:
     """Detecta línea vertical centrada (seam izquierda-derecha) sin efectos secundarios.
 
@@ -509,7 +610,7 @@ def detect_vertical_line(
         min_line_length_required = float(hough_min_length)
         min_coverage_px = float(height) * min_coverage_ratio
         strong_coverage_px = float(height) * 0.40
-        band_half = int(width * band_ratio / 4.0)
+        band_half = max(MIN_SEARCH_BAND_HALF, int(round(width * float(search_band_ratio) * 0.5)))
         x_left = max(0, int(center_x) - band_half)
         x_right = min(width, int(center_x) + band_half)
         roi = gray[:, x_left:x_right]
@@ -519,6 +620,9 @@ def detect_vertical_line(
         debug_line_info: Dict[str, Any] = {
             "center_x": center_x,
             "tolerance": center_tolerance,
+            "search_band_left": int(x_left),
+            "search_band_right": int(x_right),
+            "search_band_ratio": float(search_band_ratio),
             "total_lines": 0,
             "candidate_lines": [],
             "vertical_lines": [],
@@ -673,6 +777,10 @@ def detect_vertical_line(
 
                 total_coverage = float(sum(max(0, e - s) for s, e in merged))
                 mean_x = float(np.mean([s["line_center_x"] for s in segs]))
+                largest_merged = float(max((e - s) for s, e in merged)) if merged else 0.0
+                continuity_ratio = (
+                    float(largest_merged / total_coverage) if total_coverage > 0 else 0.0
+                )
                 if total_coverage > best_coverage:
                     best_coverage = total_coverage
                     best_candidate = {
@@ -684,6 +792,7 @@ def detect_vertical_line(
                         "distance_from_center": abs(mean_x - center_x),
                         "line_length": total_coverage,
                         "slope": float(np.mean([s["slope"] for s in segs])),
+                        "continuity_ratio": float(continuity_ratio),
                     }
 
             # Coverage gate: Hough candidate must span min_coverage_ratio of frame height
@@ -716,6 +825,7 @@ def detect_vertical_line(
                             "distance_from_center": float(abs(line_center_x - center_x)),
                             "line_length": float(line_length),
                             "slope": float(slope),
+                            "continuity_ratio": 1.0,
                             "from_lsd": True,
                         }
                         if best_candidate is None or candidate["line_length"] > best_candidate["line_length"]:
@@ -753,6 +863,7 @@ def detect_vertical_line(
                             "distance_from_center": float(abs(fitted_x_abs - center_x)),
                             "line_length": float(height),
                             "slope": float(abs(vx / vy)) if abs(vy) > 1e-9 else 0.0,
+                            "continuity_ratio": 1.0,
                             "from_fitline": True,
                         }
 
@@ -787,23 +898,65 @@ def detect_vertical_line(
             fft_check = _verify_vertical_line_with_fft(roi)
             fft_confirmed = bool(fft_check["confirmed"])
 
+            continuity_ratio = float(best_candidate.get("continuity_ratio", 1.0))
+            quality = _compute_candidate_quality(
+                line_length=float(best_candidate["line_length"]),
+                total_span=float(height),
+                min_coverage_px=float(min_coverage_px),
+                strong_coverage_px=float(strong_coverage_px),
+                distance_from_center=float(best_candidate["distance_from_center"]),
+                center_tolerance=float(center_tolerance),
+                slope=float(best_candidate.get("slope", 0.0)),
+                max_slope=float(max_slope),
+                continuity_ratio=continuity_ratio,
+            )
+
             from_fallback = bool(
                 best_candidate.get("from_lsd", False) or best_candidate.get("from_fitline", False)
+            )
+            strict_centered = bool(
+                best_candidate["distance_from_center"] <= (float(center_tolerance) * 0.65)
+            )
+            slope_tight = bool(best_candidate.get("slope", 0.0) <= (float(max_slope) * 0.70))
+            continuity_ok = bool(continuity_ratio >= 0.70)
+            quality_ok = bool(quality["quality_score"] >= float(min_quality_score))
+            fallback_quality_ok = bool(
+                quality["quality_score"] >= float(fallback_min_quality_score)
             )
             high_coverage = bool(
                 best_candidate["line_length"] >= strong_coverage_px and not from_fallback
             )
-            detection_confirmed = fft_confirmed or high_coverage
+            if from_fallback:
+                detection_confirmed = bool(
+                    fft_confirmed
+                    and fallback_quality_ok
+                    and strict_centered
+                    and slope_tight
+                    and continuity_ok
+                )
+            else:
+                detection_confirmed = bool(
+                    (fft_confirmed and quality_ok and strict_centered and continuity_ok)
+                    or (high_coverage and quality_ok and strict_centered and slope_tight and continuity_ok)
+                )
 
             debug_line_info["quality_gate"] = {
                 "fft_confirmed": fft_confirmed,
                 "from_fallback": from_fallback,
                 "high_coverage": high_coverage,
+                "strict_centered": strict_centered,
+                "slope_tight": slope_tight,
+                "continuity_ok": continuity_ok,
+                "quality_ok": quality_ok,
+                "fallback_quality_ok": fallback_quality_ok,
                 "detection_confirmed": detection_confirmed,
                 "line_length": float(best_candidate["line_length"]),
                 "min_coverage_px": float(min_coverage_px),
                 "strong_coverage_px": float(strong_coverage_px),
+                "quality_score": float(quality["quality_score"]),
+                "continuity_ratio": float(continuity_ratio),
             }
+            debug_line_info["quality_metrics"] = quality
 
             if not detection_confirmed:
                 return {
@@ -832,6 +985,7 @@ def detect_vertical_line(
                     "distance_from_center": float(best_candidate["distance_from_center"]),
                     "angle_deg": angle_deg,
                     "length": float(best_candidate["line_length"]),
+                    "quality_score": float(quality["quality_score"]),
                 },
             }
 
@@ -869,8 +1023,8 @@ def draw_line_debug(frame: np.ndarray, result: Dict[str, Any]) -> np.ndarray:
     if is_vertical:
         center_x = float(debug_line_info.get("center_x", width / 2.0))
         tolerance = float(debug_line_info.get("tolerance", width * 0.02))
-        left = max(0, int(round(center_x - tolerance)))
-        right = min(width - 1, int(round(center_x + tolerance)))
+        left = int(debug_line_info.get("search_band_left", max(0, int(round(center_x - tolerance)))))
+        right = int(debug_line_info.get("search_band_right", min(width - 1, int(round(center_x + tolerance)))))
 
         overlay = vis.copy()
         cv2.rectangle(overlay, (left, 0), (right, height - 1), (255, 0, 0), -1)
@@ -894,6 +1048,7 @@ def draw_line_debug(frame: np.ndarray, result: Dict[str, Any]) -> np.ndarray:
         text_lines = [
             f"center_x={center_x:.1f}",
             f"tolerance={tolerance:.1f}",
+            f"search_band={left}:{right}",
             f"hough_lines={int(debug_line_info.get('total_lines', 0))}",
             f"candidates={len(debug_line_info.get('candidate_lines', []))}",
             f"result={'FOUND' if found else 'NOT FOUND'}",
@@ -901,8 +1056,8 @@ def draw_line_debug(frame: np.ndarray, result: Dict[str, Any]) -> np.ndarray:
     else:
         center_y = float(debug_line_info.get("center_y", height / 2.0))
         tolerance = float(debug_line_info.get("tolerance", height * 0.02))
-        top = max(0, int(round(center_y - tolerance)))
-        bottom = min(height - 1, int(round(center_y + tolerance)))
+        top = int(debug_line_info.get("search_band_top", max(0, int(round(center_y - tolerance)))))
+        bottom = int(debug_line_info.get("search_band_bottom", min(height - 1, int(round(center_y + tolerance)))))
 
         overlay = vis.copy()
         cv2.rectangle(overlay, (0, top), (width - 1, bottom), (255, 0, 0), -1)
@@ -926,6 +1081,7 @@ def draw_line_debug(frame: np.ndarray, result: Dict[str, Any]) -> np.ndarray:
         text_lines = [
             f"center_y={center_y:.1f}",
             f"tolerance={tolerance:.1f}",
+            f"search_band={top}:{bottom}",
             f"hough_lines={int(debug_line_info.get('total_lines', 0))}",
             f"candidates={len(debug_line_info.get('candidate_lines', []))}",
             f"result={'FOUND' if found else 'NOT FOUND'}",

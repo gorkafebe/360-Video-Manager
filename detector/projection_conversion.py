@@ -274,6 +274,15 @@ def build_ffmpeg_command_for_projection(
     - yuv420p pixel format for broad MP4 compatibility,
     - libx264 + veryfast preset for convertible types.
 
+    Hardware acceleration note:
+    ``-hwaccel auto`` is **only** applied when no software filter is needed
+    (stream-copy path).  When the v360 geometric filter is used, hardware
+    decoding must be disabled because hardware decoders produce device-memory
+    frames that the software ``v360`` filter cannot read.  Leaving
+    ``-hwaccel auto`` in the v360 path causes ffmpeg to open (and truncate)
+    the output file and then exit immediately with an error, producing an
+    empty output file.
+
     Audio strategy for geometric conversion (``drop_audio=False``):
     - ``-map 0:a?`` makes the audio stream optional (no error if absent),
     - ``-c:a aac -b:a 192k`` re-encodes to AAC for MP4 container compatibility.
@@ -304,18 +313,20 @@ def build_ffmpeg_command_for_projection(
         )
 
     selected_encoder = detect_ffmpeg_h264_encoder()
-    cmd: List[str] = [
-        "ffmpeg",
-        "-hide_banner",
-        "-loglevel", "error",
-        "-y",
-        "-hwaccel", "auto",
-        "-i", input_path,
-    ]
 
     if v360_filter:
-        # Geometric remapping required — re-encode video track.
-        cmd += [
+        # Geometric remapping required — use software decoding so that the
+        # v360 filter receives CPU frames.  Hardware-decoded frames live in
+        # device memory and cannot be fed directly to software filters;
+        # including -hwaccel auto here causes ffmpeg to create (truncate) the
+        # output file and then exit immediately with an error, leaving an empty
+        # file on disk.
+        cmd: List[str] = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel", "error",
+            "-y",
+            "-i", input_path,
             "-map", "0:v",
             "-vf", v360_filter,
             "-c:v", selected_encoder,
@@ -338,7 +349,14 @@ def build_ffmpeg_command_for_projection(
             ]
     else:
         # No geometric transform needed — stream-copy to normalise container.
-        cmd += [
+        # Hardware acceleration is safe here because no software filter is applied.
+        cmd = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel", "error",
+            "-y",
+            "-hwaccel", "auto",
+            "-i", input_path,
             "-c:v", "copy",
             "-c:a", "copy",
         ]
@@ -672,6 +690,19 @@ def convert_detected_projection_to_equirectangular(
             ffmpeg_result["returncode"],
             stderr_excerpt,
         )
+        # ffmpeg opens (truncates) the output file before it starts encoding.
+        # When the command fails the output file is left empty on disk.  Remove
+        # it so that callers do not encounter a zero-byte artefact.
+        # Use a single os.stat() call to avoid a TOCTOU race between existence
+        # and size checks.
+        try:
+            if os.stat(output_path).st_size == 0:
+                os.remove(output_path)
+                logger.debug("[CONVERSION] Removed empty output file: %s", output_path)
+        except FileNotFoundError:
+            pass  # file was never created — nothing to clean up
+        except OSError as exc:
+            logger.warning("[CONVERSION] Could not remove empty output file %s: %s", output_path, exc)
         return _make_failure_result(
             projection_type=projection_type,
             input_path=video_path,

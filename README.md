@@ -292,11 +292,19 @@ root. Defaults shown are the values used when a variable is not set.
 | `VPD_MIN_FRAMES_ANALYZED` | `4` | Minimum analysed frames required for a valid result |
 | `VPD_MAX_DISCARD_RATIO` | `0.65` | Maximum acceptable frame-discard ratio |
 | `VPD_MIN_LAYOUT_SCORE_MARGIN` | `0.10` | Minimum score margin between layout hypotheses |
-| `VPD_LINE_CENTER_BAND_RATIO` | `0.08` | Band width around frame centre for seam search |
+| `VPD_LINE_CENTER_BAND_RATIO` | `0.08` | Legacy seam-band knob kept for compatibility (strict search now uses `VPD_LINE_CENTER_SEARCH_BAND_RATIO`) |
+| `VPD_LINE_CENTER_SEARCH_BAND_RATIO` | `0.02` | Strict seam search band ratio (thin central ROI used for Hough/LSD detection) |
 | `VPD_LINE_CENTER_MAX_DISTANCE_RATIO` | `0.02` | Max relative distance of seam from centre |
 | `VPD_LINE_MAX_SLOPE` | `0.05` | Maximum accepted seam slope |
 | `VPD_LINE_MIN_COVERAGE_RATIO` | `0.20` | Minimum seam coverage fraction across frame width |
+| `VPD_LINE_MIN_QUALITY_SCORE` | `0.62` | Minimum seam structural quality score for non-fallback candidates |
+| `VPD_LINE_FALLBACK_MIN_QUALITY_SCORE` | `0.78` | Minimum seam quality score for fallback (LSD/fitLine) candidates |
 | `VPD_STEREO_HIST_THRESHOLD` | `0.92` | Histogram correlation threshold for stereo detection |
+| `VPD_STEREO_SEAM_GUARD_RATIO` | `0.02` | Guard band excluded around detected seam before top/bottom (or left/right) comparison |
+| `VPD_STEREO_MIN_VALID_HALF_RATIO` | `0.22` | Minimum usable side/half size ratio required after seam-guard cropping |
+| `VPD_STEREO_EDGE_SIMILARITY_THRESHOLD` | `0.08` | Minimum edge-structure similarity required for a stereo frame match |
+| `VPD_STEREO_MIN_SEAM_FRAMES` | `2` | Minimum seam-detected frames required before stereo classification runs |
+| `VPD_STEREO_MIN_STABILITY_RATIO` | `0.55` | Minimum temporal match stability ratio for stereo decision |
 | `VPD_SAVE_STEREO_HALVES` | `true` | Save left/right half-frame debug images |
 | `VPD_FLOW_ALGORITHM` | `deepflow` | Preferred optical-flow algorithm hint; rollout profile and runtime capabilities can override to a higher-priority available algorithm |
 | `VPD_FLOW_ENABLE_REFINEMENT` | `false` | Enable optional variational refinement on top of base optical flow |

@@ -901,6 +901,11 @@ def run_detection_pipeline(
 
         stereo_hist_threshold = float(CONFIG["stereo_hist_similarity_threshold"])
         save_stereo_halves_enabled = bool(CONFIG["save_stereo_halves"])
+        stereo_seam_guard_ratio = float(CONFIG["stereo_seam_guard_ratio"])
+        stereo_min_valid_half_ratio = float(CONFIG["stereo_min_valid_half_ratio"])
+        stereo_edge_similarity_threshold = float(CONFIG["stereo_edge_similarity_threshold"])
+        stereo_min_seam_frames = int(CONFIG["stereo_min_seam_frames"])
+        stereo_min_stability_ratio = float(CONFIG["stereo_min_stability_ratio"])
 
         total_frames_video = 0
         video_path_procesado = video_path
@@ -1009,7 +1014,9 @@ def run_detection_pipeline(
         discarded_no_line = 0
         frames_guardados: List[str] = []
         indices_con_linea: List[int] = []
+        seam_centers_horizontal: Dict[int, int] = {}
         indices_con_linea_vertical: List[int] = []  # frames with vertical line only (LR stereo candidate)
+        seam_centers_vertical: Dict[int, int] = {}
         equi_frame_results: List[Dict[str, Any]] = []
 
         logger.info(f"\nAnalizando {len(frames)} frames con detección de línea horizontal...\n")
@@ -1031,9 +1038,11 @@ def run_detection_pipeline(
             line_result = detect_horizontal_line(
                 frame,
                 center_tolerance_ratio=CONFIG["line_center_max_distance_ratio"],
-                band_ratio=CONFIG["line_center_band_ratio"],
+                search_band_ratio=CONFIG["line_center_search_band_ratio"],
                 max_slope=CONFIG["line_max_slope"],
                 min_coverage_ratio=CONFIG["line_min_coverage_ratio"],
+                min_quality_score=CONFIG["line_min_quality_score"],
+                fallback_min_quality_score=CONFIG["line_fallback_min_quality_score"],
             )
             frames_analyzed += 1
 
@@ -1057,6 +1066,9 @@ def run_detection_pipeline(
                 log_success(f"[MAIN][idx={idx+1:02d}][video_frame={pos_tag}] -> USED (horizontal_line_detected)")
                 line_data = line_result.get("line_data")
                 if line_data:
+                    seam_centers_horizontal[idx] = int(
+                        line_data.get("center_y", frame.shape[0] // 2)
+                    )
                     if global_pos is not None:
                         line_data["video_position"] = int(global_pos)
                     fp = save_line_detected_frame(frame, line_data, idx + 1, horizontal_line_dir)
@@ -1071,9 +1083,11 @@ def run_detection_pipeline(
                 vert_result = detect_vertical_line(
                     frame,
                     center_tolerance_ratio=CONFIG["line_center_max_distance_ratio"],
-                    band_ratio=CONFIG["line_center_band_ratio"],
+                    search_band_ratio=CONFIG["line_center_search_band_ratio"],
                     max_slope=CONFIG["line_max_slope"],
                     min_coverage_ratio=CONFIG["line_min_coverage_ratio"],
+                    min_quality_score=CONFIG["line_min_quality_score"],
+                    fallback_min_quality_score=CONFIG["line_fallback_min_quality_score"],
                 )
                 save_line_visual_debug(
                     frame=frame,
@@ -1096,6 +1110,9 @@ def run_detection_pipeline(
                     )
                     vertical_line_data = vert_result.get("line_data")
                     if vertical_line_data:
+                        seam_centers_vertical[idx] = int(
+                            vertical_line_data.get("center_x", frame.shape[1] // 2)
+                        )
                         if global_pos is not None:
                             vertical_line_data["video_position"] = int(global_pos)
                         fp = save_line_detected_frame(frame, vertical_line_data, idx + 1, horizontal_line_dir)
@@ -1140,6 +1157,12 @@ def run_detection_pipeline(
                         indices_con_linea=indices_con_linea_vertical,
                         similarity_threshold=stereo_hist_threshold,
                         arrangement="left-right",
+                        line_centers=seam_centers_vertical,
+                        seam_guard_ratio=stereo_seam_guard_ratio,
+                        min_valid_half_ratio=stereo_min_valid_half_ratio,
+                        edge_similarity_threshold=stereo_edge_similarity_threshold,
+                        min_frames_required=stereo_min_seam_frames,
+                        min_stability_ratio=stereo_min_stability_ratio,
                     )
                     stereo_avg_similarity = float(stereo_lr_result["avg_similarity"])
                     for detail in stereo_lr_result.get("frame_details", []):
@@ -1160,6 +1183,7 @@ def run_detection_pipeline(
                         f"matches={stereo_lr_result['frames_match']} no_matches={stereo_lr_result['frames_no_match']} "
                         f"match_ratio={float(stereo_lr_result['match_ratio']):.0%} required={float(stereo_lr_result['min_match_ratio']):.0%} "
                         f"avg_corr={float(stereo_lr_result['avg_similarity']):.4f} avg_bhatt={float(stereo_lr_result['avg_bhattacharyya']):.4f} "
+                        f"avg_edge={float(stereo_lr_result['avg_edge_similarity']):.4f} stability={float(stereo_lr_result['stability_ratio']):.0%} "
                         f"thresholds=(corr>={stereo_hist_threshold} bhatt<={float(stereo_lr_result['bhattacharyya_threshold'])}) "
                         f"decision={'stereo_equi_lr' if stereo_lr_result['is_stereo'] else 'not_stereo_lr'}"
                     )
@@ -1191,11 +1215,42 @@ def run_detection_pipeline(
                     motion_reliability_reason = "early_equirectangular_no_horizontal_line"
                     log_success("Clasificación temprana: EQUIRECTANGULAR (no se detectó línea horizontal en frames analizados).")
             else:
-                stereo_result = detect_stereo(
-                    frames=frames,
-                    indices_con_linea=indices_con_linea,
-                    similarity_threshold=stereo_hist_threshold,
-                )
+                if len(indices_con_linea) < stereo_min_seam_frames:
+                    stereo_result = {
+                        "is_stereo": False,
+                        "frames_evaluados": 0,
+                        "frames_match": 0,
+                        "frames_no_match": 0,
+                        "avg_similarity": 0.0,
+                        "avg_bhattacharyya": 1.0,
+                        "avg_edge_similarity": 0.0,
+                        "avg_combined_score": 0.0,
+                        "match_ratio": 0.0,
+                        "min_match_ratio": 0.60,
+                        "longest_mismatch_streak": 0,
+                        "stability_ratio": 0.0,
+                        "min_frames_required": stereo_min_seam_frames,
+                        "min_stability_ratio": stereo_min_stability_ratio,
+                        "edge_similarity_threshold": stereo_edge_similarity_threshold,
+                        "bhattacharyya_threshold": 0.30,
+                        "frame_details": [],
+                    }
+                    logger.info(
+                        f"[STEREO] Skipped: insufficient seam frames "
+                        f"({len(indices_con_linea)}<{stereo_min_seam_frames})"
+                    )
+                else:
+                    stereo_result = detect_stereo(
+                        frames=frames,
+                        indices_con_linea=indices_con_linea,
+                        similarity_threshold=stereo_hist_threshold,
+                        line_centers=seam_centers_horizontal,
+                        seam_guard_ratio=stereo_seam_guard_ratio,
+                        min_valid_half_ratio=stereo_min_valid_half_ratio,
+                        edge_similarity_threshold=stereo_edge_similarity_threshold,
+                        min_frames_required=stereo_min_seam_frames,
+                        min_stability_ratio=stereo_min_stability_ratio,
+                    )
                 stereo_avg_similarity = float(stereo_result["avg_similarity"])
                 for detail in stereo_result.get("frame_details", []):
                     match_label = "MATCH" if detail["match"] else "NO MATCH"
@@ -1216,6 +1271,7 @@ def run_detection_pipeline(
                     f"matches={stereo_result['frames_match']} no_matches={stereo_result['frames_no_match']} "
                     f"match_ratio={float(stereo_result['match_ratio']):.0%} required={float(stereo_result['min_match_ratio']):.0%} "
                     f"avg_corr={float(stereo_result['avg_similarity']):.4f} avg_bhatt={float(stereo_result['avg_bhattacharyya']):.4f} "
+                    f"avg_edge={float(stereo_result['avg_edge_similarity']):.4f} stability={float(stereo_result['stability_ratio']):.0%} "
                     f"thresholds=(corr>={stereo_hist_threshold} bhatt<={float(stereo_result['bhattacharyya_threshold'])}) "
                     f"decision={'stereo_equi' if stereo_result['is_stereo'] else 'not_stereo'}"
                 )

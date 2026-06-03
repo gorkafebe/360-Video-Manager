@@ -153,13 +153,31 @@ class Settings:
         self.max_discard_ratio: float = _env_float("VPD_MAX_DISCARD_RATIO", 0.65)
         self.min_layout_score_margin: float = _env_float("VPD_MIN_LAYOUT_SCORE_MARGIN", 0.10)
         self.line_center_band_ratio: float = _env_float("VPD_LINE_CENTER_BAND_RATIO", 0.08)
+        self.line_center_search_band_ratio: float = _env_float(
+            "VPD_LINE_CENTER_SEARCH_BAND_RATIO", 0.02
+        )
         self.line_center_max_distance_ratio: float = _env_float(
             "VPD_LINE_CENTER_MAX_DISTANCE_RATIO", 0.02
         )
         self.line_max_slope: float = _env_float("VPD_LINE_MAX_SLOPE", 0.05)
         self.line_min_coverage_ratio: float = _env_float("VPD_LINE_MIN_COVERAGE_RATIO", 0.20)
+        self.line_min_quality_score: float = _env_float("VPD_LINE_MIN_QUALITY_SCORE", 0.62)
+        self.line_fallback_min_quality_score: float = _env_float(
+            "VPD_LINE_FALLBACK_MIN_QUALITY_SCORE", 0.78
+        )
         self.stereo_hist_similarity_threshold: float = _env_float(
             "VPD_STEREO_HIST_THRESHOLD", 0.92
+        )
+        self.stereo_seam_guard_ratio: float = _env_float("VPD_STEREO_SEAM_GUARD_RATIO", 0.02)
+        self.stereo_min_valid_half_ratio: float = _env_float(
+            "VPD_STEREO_MIN_VALID_HALF_RATIO", 0.22
+        )
+        self.stereo_edge_similarity_threshold: float = _env_float(
+            "VPD_STEREO_EDGE_SIMILARITY_THRESHOLD", 0.08
+        )
+        self.stereo_min_seam_frames: int = _env_int("VPD_STEREO_MIN_SEAM_FRAMES", 2)
+        self.stereo_min_stability_ratio: float = _env_float(
+            "VPD_STEREO_MIN_STABILITY_RATIO", 0.55
         )
         self.save_stereo_halves: bool = _env_bool("VPD_SAVE_STEREO_HALVES", True)
         self.flow_algorithm: str = _env_str("VPD_FLOW_ALGORITHM", "deepflow")
@@ -196,10 +214,18 @@ class Settings:
             "max_discard_ratio": self.max_discard_ratio,
             "min_layout_score_margin": self.min_layout_score_margin,
             "line_center_band_ratio": self.line_center_band_ratio,
+            "line_center_search_band_ratio": self.line_center_search_band_ratio,
             "line_center_max_distance_ratio": self.line_center_max_distance_ratio,
             "line_max_slope": self.line_max_slope,
             "line_min_coverage_ratio": self.line_min_coverage_ratio,
+            "line_min_quality_score": self.line_min_quality_score,
+            "line_fallback_min_quality_score": self.line_fallback_min_quality_score,
             "stereo_hist_similarity_threshold": self.stereo_hist_similarity_threshold,
+            "stereo_seam_guard_ratio": self.stereo_seam_guard_ratio,
+            "stereo_min_valid_half_ratio": self.stereo_min_valid_half_ratio,
+            "stereo_edge_similarity_threshold": self.stereo_edge_similarity_threshold,
+            "stereo_min_seam_frames": self.stereo_min_seam_frames,
+            "stereo_min_stability_ratio": self.stereo_min_stability_ratio,
             "save_stereo_halves": self.save_stereo_halves,
             "flow_algorithm": self.flow_algorithm,
             "flow_enable_refinement": self.flow_enable_refinement,

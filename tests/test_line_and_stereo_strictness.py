@@ -138,7 +138,7 @@ class StereoPolicyTests(unittest.TestCase):
         mock_edge,
         mock_extract,
     ) -> None:
-        frame = types.SimpleNamespace(shape=(101, 40, 3))
+        frame = types.SimpleNamespace(shape=(80, 40, 3))
         _mock_hist.side_effect = [0.0, 0.0, 0.0, 0.0]
         mock_compare_hist.side_effect = [
             {"correlation": 0.95, "bhattacharyya": 0.08},  # seam-aware

@@ -7,6 +7,9 @@ import numpy as np
 from .preprocessing import prepare_frame_for_line_detection
 
 
+MIN_SEARCH_BAND_HALF = 2
+
+
 def _compute_candidate_quality(
     *,
     line_length: float,
@@ -111,7 +114,7 @@ def detect_horizontal_line(
         min_line_length_required = float(hough_min_length)
         min_coverage_px = float(width) * min_coverage_ratio  # minimum merged span
         strong_coverage_px = float(width) * 0.40  # span that overrides FFT requirement
-        band_half = max(2, int(round(height * float(search_band_ratio) * 0.5)))
+        band_half = max(MIN_SEARCH_BAND_HALF, int(round(height * float(search_band_ratio) * 0.5)))
         y_top = max(0, int(center_y) - band_half)
         y_bottom = min(height, int(center_y) + band_half)
         roi = gray[y_top:y_bottom, :]
@@ -299,7 +302,7 @@ def detect_horizontal_line(
 
                 total_coverage = float(sum(max(0, e - s) for s, e in merged))
                 mean_y = float(np.mean([s["line_center_y"] for s in segs]))
-                largest_merged = float(max((e - s) for s, e in merged))
+                largest_merged = float(max((e - s) for s, e in merged)) if merged else 0.0
                 continuity_ratio = (
                     float(largest_merged / total_coverage) if total_coverage > 0 else 0.0
                 )
@@ -607,7 +610,7 @@ def detect_vertical_line(
         min_line_length_required = float(hough_min_length)
         min_coverage_px = float(height) * min_coverage_ratio
         strong_coverage_px = float(height) * 0.40
-        band_half = max(2, int(round(width * float(search_band_ratio) * 0.5)))
+        band_half = max(MIN_SEARCH_BAND_HALF, int(round(width * float(search_band_ratio) * 0.5)))
         x_left = max(0, int(center_x) - band_half)
         x_right = min(width, int(center_x) + band_half)
         roi = gray[:, x_left:x_right]
@@ -774,7 +777,7 @@ def detect_vertical_line(
 
                 total_coverage = float(sum(max(0, e - s) for s, e in merged))
                 mean_x = float(np.mean([s["line_center_x"] for s in segs]))
-                largest_merged = float(max((e - s) for s, e in merged))
+                largest_merged = float(max((e - s) for s, e in merged)) if merged else 0.0
                 continuity_ratio = (
                     float(largest_merged / total_coverage) if total_coverage > 0 else 0.0
                 )

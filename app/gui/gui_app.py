@@ -304,7 +304,7 @@ class VR360ManagerApp:
             command=self._on_new_playlist,
         ).grid(row=1, column=2, padx=(0, 12), pady=(4, 10))
 
-        ctk.CTkLabel(upload_opts, text="Paciente (Categoría):").grid(
+        ctk.CTkLabel(upload_opts, text="Paciente (Categoría opcional):").grid(
             row=2, column=0, padx=(12, 6), pady=(4, 10), sticky="w")
         self._category_var = tkinter.StringVar(value=_NO_CATEGORY)
         self._category_menu = ctk.CTkOptionMenu(
@@ -893,12 +893,6 @@ class VR360ManagerApp:
             return
         playlist_id = self._get_playlist_id()
         category_id = self._get_category_id()
-        if not category_id:
-            tkinter.messagebox.showwarning(
-                "Advertencia",
-                "Selecciona o crea una categoría de paciente antes de subir.",
-            )
-            return
         tags = self._parse_tags(self._tags_entry.get().strip())
         self._set_state(AppState.UPLOADING)
         self._progress_start_indeterminate("Subiendo…")

@@ -161,6 +161,38 @@ class UploadMetadataTests(unittest.TestCase):
     @patch("config.settings.get_settings")
     @patch("requests.post")
     @patch("os.path.exists", return_value=True)
+    def test_upload_without_category_omits_category_field(
+        self,
+        _mock_exists,
+        mock_post,
+        mock_get_settings,
+    ):
+        mock_get_settings.return_value = self.fake_settings
+        mock_resp = MagicMock(status_code=201)
+        mock_resp.json.return_value = {
+            "friendly_token": "tok-125",
+            "media_url": "https://cms.example.com/media/tok-125",
+        }
+        mock_post.return_value = mock_resp
+
+        with patch("builtins.open", mock_open(read_data=b"video-bytes")):
+            result = upload_video_asset(
+                video_path="/tmp/video.mp4",
+                title="Session Upload",
+                description="desc",
+                api_url="https://cms.example.com/api/v1/media",
+                tags=["anxiety"],
+            )
+
+        self.assertTrue(result.success)
+        call_kwargs = mock_post.call_args.kwargs
+        self.assertIn("data", call_kwargs)
+        self.assertNotIn("category", call_kwargs["data"])
+        self.assertEqual(call_kwargs["data"]["tags"], "anxiety")
+
+    @patch("config.settings.get_settings")
+    @patch("requests.post")
+    @patch("os.path.exists", return_value=True)
     def test_upload_includes_category_and_tags(
         self,
         _mock_exists,

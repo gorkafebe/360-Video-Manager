@@ -159,9 +159,9 @@ The GUI launches a CustomTkinter window. Workflow:
    download → codec normalise → detect projection → convert if needed.
    Progress and status are shown in the always-visible bottom bar.
 4. **Upload to CMS** — becomes available after a successful Download & Process.
-   Assign a title, choose or create a **patient category** (selected by the
-   psychologist), optionally add personalized tags, and choose an existing
-   MediaCMS playlist or create a new one before uploading.
+   Assign a title, optionally choose or create a **patient category** (selected
+   by the psychologist), optionally add personalized tags, and choose an
+   existing MediaCMS playlist or create a new one before uploading.
 5. **Log panel** — toggled with the "Show log" button; displays structured
    pipeline log output in real time.
 

@@ -220,10 +220,13 @@ The detector (`detector/pipeline.py`) runs without ML models:
 | Detected projection | Conversion action |
 |---|---|
 | `equirectangular` | Skipped — already target format |
-| `stereo_equi` | Skipped — geometry is already equirectangular |
+| `stereo_equi` | Converted — stereo layout is flattened to mono equirectangular output (top-bottom and left-right) |
 | `eac` | Converted via `ffmpeg v360=eac:equirect` |
 | `cubic` | Converted via `ffmpeg v360=c3x2:equirect` |
 | `unknown` | **Falls back to `eac`** and conversion is attempted |
+
+For `stereo_equi`, conversion is expected for both stereo packing variants:
+top-bottom and left-right.
 
 The `unknown → eac` fallback is applied in `workflows/unified_pipeline.py`
 `_stage_convert_to_equirectangular` with a `WARNING` log entry, so the
@@ -251,7 +254,7 @@ layouts. The conversion layer:
 | Value | Description |
 |---|---|
 | `equirectangular` | Standard 2:1 equidistant cylindrical format |
-| `stereo_equi` | Stereo pair in equirectangular layout (side-by-side or top-bottom) |
+| `stereo_equi` | Stereo pair in equirectangular layout (side-by-side or top-bottom), flattened to mono equirectangular output during conversion |
 | `eac` | Equi-Angular Cubemap — the YouTube 360° VR standard |
 | `cubic` | Conventional cubemap in a 3×2 face layout |
 | `unknown` | Insufficient data or confidence below threshold |
@@ -347,7 +350,7 @@ Current test files:
 | File | Coverage |
 |---|---|
 | `tests/test_progress_and_downloader.py` | Download-progress parsing, rate-limiting delay, yt-dlp output-path resolution |
-| `tests/test_fallback_and_adaptive.py` | `unknown → eac` conversion fallback; `equirectangular`/`stereo_equi` skip behaviour; low-confidence skip; adaptive wraplength formula |
+| `tests/test_fallback_and_adaptive.py` | `unknown → eac` conversion fallback; `equirectangular` skip behaviour; `stereo_equi` conversion expectation; low-confidence skip; adaptive wraplength formula |
 | `tests/test_uploader.py` | Playlist endpoint URL construction; robustness against trailing slashes and non-`/media` API paths |
 | `tests/test_youtube.py` | Ordered de-duplication of search results; 360° projection filter; URL video ID extraction |
 

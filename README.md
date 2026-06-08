@@ -65,14 +65,6 @@ tests/
   test_fallback_and_adaptive.py
 ```
 
-> **Note on virtualenv directories**: `bin/`, `lib/`, `share/`, `include/`,
-> and `pyvenv.cfg` are committed to this repository. They are **not** excluded
-> by `.gitignore` (which only ignores `.venv/`, `venv/`, `env/`, `ENV/`).
-> The project is designed to be used with the committed virtualenv activated
-> from the project root.
-
----
-
 ## Prerequisites
 
 - Python 3.9+
@@ -83,7 +75,7 @@ tests/
   sudo dnf install ffmpeg          # Fedora / RHEL
   brew install ffmpeg              # macOS (Homebrew)
   ```
-- **tkinter** — not bundled in the virtualenv on Linux; install the system
+- **tkinter** — not bundled by default on some Linux Python builds; install the system
   package before running the GUI:
   ```bash
   sudo apt install python3-tk      # Debian / Ubuntu
@@ -98,11 +90,19 @@ tests/
 git clone <repo>
 cd 360-Video-Manager
 
-# Activate the virtualenv that ships with the repo
-source bin/activate          # Linux / macOS
-# bin\Activate.ps1            # Windows PowerShell
+# Create and activate a local virtual environment
+python3 -m venv .venv
+source .venv/bin/activate          # Linux / macOS
+# .venv\Scripts\Activate.ps1       # Windows PowerShell
 
 pip install -r requirements.txt
+```
+
+Or use the one-command helper:
+
+```bash
+./scripts/setup.sh
+source .venv/bin/activate
 ```
 
 > OpenCV dependency note: this project uses `opencv-contrib-python` (which
@@ -117,7 +117,12 @@ are importable as top-level packages.
 
 ## Configuration
 
-Create a `.env` file in the project root (or export the variables directly).
+Copy `.env.example` to `.env` in the project root (or export the variables directly):
+
+```bash
+cp .env.example .env
+```
+
 Settings are loaded by `config/settings.py` at startup via `python-dotenv`
 (with a built-in fallback parser if `python-dotenv` is unavailable).
 
@@ -344,7 +349,7 @@ Safety invariants:
 
 ```bash
 # Run the full test suite (from project root, virtualenv active)
-./bin/python -m pytest tests/ -v
+python -m pytest tests/ -v
 ```
 
 Current test files:
@@ -360,12 +365,11 @@ Current test files:
 
 ## Known issues / caveats
 
-### Virtualenv committed to the repository
+### tkinter system dependency
 
-The virtualenv directories (`bin/`, `lib/`, `share/`, `include/`, `pyvenv.cfg`)
-are tracked by git. They are not listed in `.gitignore` (which only excludes
-`.venv/`, `venv/`, `env/`, `ENV/`). This is the intended layout for this
-repository; activate using `source bin/activate` from the project root.
+On Linux environments where tkinter is missing, importing `app.gui.gui_app`
+will fail and tests that import GUI modules will fail at collection time.
+Install `python3-tk` / `python3-tkinter` before running the GUI or full tests.
 
 ### Cubemap layout assumption
 

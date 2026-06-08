@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "360-video-manager"
+version = "0.1.0"
+description = "Download, detect, convert, and upload 360° videos."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "google-api-python-client>=2.196.0,<3",
+    "yt-dlp>=2025.1.0,<2027.0.0",
+    "requests>=2.32.0,<3",
+    "python-dotenv>=1.0.1,<2",
+    "pillow>=10.4.0,<12",
+    "opencv-contrib-python>=4.13.0.92,<4.14",
+    "numpy>=1.26,<3",
+    "customtkinter>=5.2,<6",
+]
+
+[project.scripts]
+360-video-manager = "app.main:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*", "config*", "core*", "detector*", "workflows*", "utils*"]

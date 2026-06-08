@@ -95,15 +95,16 @@ class VideoIOSamplingFallbackTests(unittest.TestCase):
         with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp_video:
             path = tmp_video.name
 
-        import os, time
+        import os
+        import time
         from detector.video_io import probe_video_stream
         probe_video_stream(path)
-        # Simulate mtime change by touching the file
+        # Simulate mtime change by touching the file — the cache key will differ
         time.sleep(0.01)
         os.utime(path, None)
-        clear_probe_cache()  # simulate a new run after file change
         probe_video_stream(path)
 
+        # Both calls should have gone to ffprobe because mtime changed the cache key
         self.assertEqual(mock_ffprobe.call_count, 2)
         os.unlink(path)
 

@@ -1,9 +1,8 @@
-google-api-python-client
-yt-dlp
-requests
-python-dotenv
-pillow
-opencv-contrib-python==4.10.0.84
-numpy
-moviepy==1.0.3
-customtkinter>=5.2
+google-api-python-client>=2.196.0,<3
+yt-dlp>=2025.1.0,<2027.0.0
+requests>=2.32.0,<3
+python-dotenv>=1.0.1,<2
+pillow>=10.4.0,<12
+opencv-contrib-python>=4.13.0.92,<4.14
+numpy>=1.26,<3
+customtkinter>=5.2,<6

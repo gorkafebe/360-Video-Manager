@@ -2,7 +2,12 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from detector.video_io import extract_main_frames
+from detector.video_io import (
+    clear_probe_cache,
+    extract_main_frames,
+    extract_secondary_frames,
+    open_video_capture,
+)
 
 
 class _FakeCapture:
@@ -31,14 +36,20 @@ class _FrameLike:
 
 
 class VideoIOSamplingFallbackTests(unittest.TestCase):
-    @patch("detector.video_io._extract_single_frame_ffmpeg")
+    def setUp(self):
+        clear_probe_cache()
+
+    def tearDown(self):
+        clear_probe_cache()
+
+    @patch("detector.video_io._extract_batch_frames_ffmpeg")
     @patch("detector.video_io.probe_video_stream")
     @patch("detector.video_io.cv2.VideoCapture")
     def test_extract_main_frames_uses_ffmpeg_sampling_when_opencv_decode_fails(
         self,
         mock_capture,
         mock_probe,
-        mock_extract_ffmpeg,
+        mock_extract_batch,
     ):
         mock_capture.return_value = _FakeCapture(opened=False)
         mock_probe.return_value = {
@@ -46,7 +57,7 @@ class VideoIOSamplingFallbackTests(unittest.TestCase):
             "fps": 24.0,
             "duration": 10.0,
         }
-        mock_extract_ffmpeg.return_value = _FrameLike()
+        mock_extract_batch.return_value = [_FrameLike(), _FrameLike(), _FrameLike(), _FrameLike()]
 
         with tempfile.NamedTemporaryFile(suffix=".mp4") as tmp_video:
             result = extract_main_frames(tmp_video.name, num_frames=4, guardar_frames=False)
@@ -54,6 +65,80 @@ class VideoIOSamplingFallbackTests(unittest.TestCase):
         self.assertEqual(len(result["frames"]), 4)
         self.assertEqual(result["fallback_ffmpeg_frames"], 4)
         self.assertEqual(result["video_path_procesado"], tmp_video.name)
+        mock_extract_batch.assert_called_once()
+
+    @patch("detector.video_io._run_ffprobe_json")
+    def test_probe_cache_avoids_repeated_ffprobe_calls(self, mock_ffprobe):
+        mock_ffprobe.return_value = {
+            "streams": [{"codec_type": "video", "avg_frame_rate": "24/1", "nb_frames": "240",
+                          "duration": "10.0", "width": 1920, "height": 1080,
+                          "codec_name": "h264", "pix_fmt": "yuv420p"}],
+            "format": {"duration": "10.0"},
+        }
+        with tempfile.NamedTemporaryFile(suffix=".mp4") as tmp_video:
+            from detector.video_io import probe_video_stream
+            result1 = probe_video_stream(tmp_video.name)
+            result2 = probe_video_stream(tmp_video.name)
+
+        mock_ffprobe.assert_called_once()
+        self.assertEqual(result1["fps"], 24.0)
+        self.assertEqual(result2["fps"], 24.0)
+
+    @patch("detector.video_io._run_ffprobe_json")
+    def test_probe_cache_bypassed_on_mtime_change(self, mock_ffprobe):
+        mock_ffprobe.return_value = {
+            "streams": [{"codec_type": "video", "avg_frame_rate": "24/1", "nb_frames": "120",
+                          "duration": "5.0", "width": 1280, "height": 720,
+                          "codec_name": "h264", "pix_fmt": "yuv420p"}],
+            "format": {"duration": "5.0"},
+        }
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp_video:
+            path = tmp_video.name
+
+        import os, time
+        from detector.video_io import probe_video_stream
+        probe_video_stream(path)
+        # Simulate mtime change by touching the file
+        time.sleep(0.01)
+        os.utime(path, None)
+        clear_probe_cache()  # simulate a new run after file change
+        probe_video_stream(path)
+
+        self.assertEqual(mock_ffprobe.call_count, 2)
+        os.unlink(path)
+
+    @patch("detector.video_io._extract_batch_frames_ffmpeg")
+    @patch("detector.video_io.probe_video_stream")
+    @patch("detector.video_io.cv2.VideoCapture")
+    def test_shared_cap_session_opens_opencv_once(
+        self,
+        mock_capture,
+        mock_probe,
+        mock_extract_batch,
+    ):
+        """cv2.VideoCapture should be called exactly once when cap_session is shared."""
+        mock_capture.return_value = _FakeCapture(opened=False)
+        mock_probe.return_value = {
+            "total_frames": 120,
+            "fps": 24.0,
+            "duration": 5.0,
+        }
+        mock_extract_batch.return_value = [_FrameLike(), _FrameLike()]
+
+        with tempfile.NamedTemporaryFile(suffix=".mp4") as tmp_video:
+            with open_video_capture(tmp_video.name) as cap_session:
+                extract_main_frames(
+                    tmp_video.name, num_frames=2, guardar_frames=False, cap_session=cap_session
+                )
+                extract_secondary_frames(
+                    tmp_video.name,
+                    frame_positions=[10, 20],
+                    total_frames=120,
+                    cap_session=cap_session,
+                )
+
+        # cv2.VideoCapture opened once (for the shared session), not once per function
+        mock_capture.assert_called_once_with(tmp_video.name)
 
 
 if __name__ == "__main__":

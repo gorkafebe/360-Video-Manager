@@ -2,7 +2,7 @@ import os
 import json
 import subprocess
 import tempfile
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -12,6 +12,26 @@ from .projection_conversion import detect_ffmpeg_h264_encoder, _is_hardware_enco
 
 class FrameExtractorError(Exception):
     """Excepción base para errores de extracción de frames."""
+
+
+# ---------------------------------------------------------------------------
+# 1c — probe_video_stream cache
+# ---------------------------------------------------------------------------
+_PROBE_CACHE: Dict[Tuple[str, float], Dict[str, Any]] = {}
+
+
+def _probe_cache_key(video_path: str) -> Tuple[str, float]:
+    abs_path = os.path.abspath(video_path)
+    try:
+        mtime = os.path.getmtime(abs_path)
+    except OSError:
+        mtime = 0.0
+    return (abs_path, mtime)
+
+
+def clear_probe_cache() -> None:
+    """Limpia la caché de resultados de probe_video_stream."""
+    _PROBE_CACHE.clear()
 
 
 def _can_decode_with_opencv(video_path: str) -> bool:
@@ -66,6 +86,10 @@ def _parse_ratio(value: Optional[str]) -> float:
 
 def probe_video_stream(video_path: str) -> Dict[str, Any]:
     """Devuelve metadatos de stream principal usando ffprobe cuando está disponible."""
+    cache_key = _probe_cache_key(video_path)
+    if cache_key in _PROBE_CACHE:
+        return dict(_PROBE_CACHE[cache_key])
+
     metadata: Dict[str, Any] = {
         "path": video_path,
         "codec_name": None,
@@ -111,6 +135,7 @@ def probe_video_stream(video_path: str) -> Dict[str, Any]:
             "source": "ffprobe",
         }
     )
+    _PROBE_CACHE[cache_key] = dict(metadata)
     return metadata
 
 
@@ -149,6 +174,116 @@ def _compute_even_positions(start_frame: int, end_frame: int, num_frames: int) -
         start_frame + int(i * (end_frame - start_frame) / (num_frames - 1))
         for i in range(num_frames)
     ]
+
+
+def _split_mjpeg_stream(data: bytes) -> List[bytes]:
+    """Divide un stream MJPEG concatenado en imágenes JPEG individuales."""
+    SOI = b"\xff\xd8"
+    EOI = b"\xff\xd9"
+    images: List[bytes] = []
+    pos = 0
+    while pos < len(data):
+        start = data.find(SOI, pos)
+        if start == -1:
+            break
+        end = data.find(EOI, start + 2)
+        if end == -1:
+            break
+        images.append(data[start : end + 2])
+        pos = end + 2
+    return images
+
+
+def _extract_batch_frames_ffmpeg(
+    video_path: str,
+    timestamps_seconds: List[float],
+    timeout: int = 120,
+) -> List[Optional[np.ndarray]]:
+    """Extrae todos los frames indicados en un único proceso ffmpeg usando el filtro select."""
+    if not timestamps_seconds:
+        return []
+
+    select_expr = "+".join(
+        f"lt(prev_pts*TB,{t:.6f})*gte(pts*TB,{t:.6f})" for t in timestamps_seconds
+    )
+    cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        video_path,
+        "-vf",
+        f"select='{select_expr}'",
+        "-vsync",
+        "vfr",
+        "-f",
+        "image2pipe",
+        "-vcodec",
+        "mjpeg",
+        "-",
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, timeout=timeout)
+    except Exception:
+        return [None] * len(timestamps_seconds)
+
+    if proc.returncode != 0 or not proc.stdout:
+        return [None] * len(timestamps_seconds)
+
+    raw_images = _split_mjpeg_stream(proc.stdout)
+    results: List[Optional[np.ndarray]] = []
+    for i in range(len(timestamps_seconds)):
+        if i < len(raw_images):
+            buf = np.frombuffer(raw_images[i], dtype=np.uint8)
+            frame = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+            results.append(frame if (frame is not None and frame.size > 0) else None)
+        else:
+            results.append(None)
+    return results
+
+
+# ---------------------------------------------------------------------------
+# 1b — Shared VideoCapture session
+# ---------------------------------------------------------------------------
+
+class _CachedCapture:
+    """Wrapper sobre cv2.VideoCapture que gestiona el ciclo de vida de forma segura."""
+
+    def __init__(self, video_path: str) -> None:
+        self._path = video_path
+        self._cap = cv2.VideoCapture(video_path)
+        self.can_decode: bool = self._cap.isOpened()
+        if self.can_decode:
+            ret, _ = self._cap.read()
+            self.can_decode = bool(ret)
+            if self.can_decode:
+                self._cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        self.total_frames: int = int(self._cap.get(cv2.CAP_PROP_FRAME_COUNT)) if self.can_decode else 0
+        self.fps: float = float(self._cap.get(cv2.CAP_PROP_FPS)) if self.can_decode else 0.0
+
+    def read_frame(self, position: int) -> Optional[np.ndarray]:
+        if not self.can_decode:
+            return None
+        self._cap.set(cv2.CAP_PROP_POS_FRAMES, position)
+        ret, frame = self._cap.read()
+        if ret and frame is not None:
+            return frame
+        return None
+
+    def release(self) -> None:
+        self._cap.release()
+
+    def __enter__(self) -> "_CachedCapture":
+        return self
+
+    def __exit__(self, *_: Any) -> None:
+        self.release()
+
+
+def open_video_capture(video_path: str) -> "_CachedCapture":
+    """Abre un VideoCapture gestionado como context manager."""
+    return _CachedCapture(video_path)
 
 
 def convert_video_codec(video_path: str) -> str:
@@ -254,6 +389,7 @@ def extract_main_frames(
     save_image_fn: Optional[Callable[[str, np.ndarray, str], bool]] = None,
     log_success_fn: Optional[Callable[[str], None]] = None,
     log_discard_fn: Optional[Callable[[str], None]] = None,
+    cap_session: Optional[_CachedCapture] = None,
 ) -> Dict[str, Any]:
     """Extrae frames principales con estrategia equiespaciada o primera/última."""
     if not os.path.exists(video_path):
@@ -261,26 +397,24 @@ def extract_main_frames(
     if modo_extraccion not in ["equiespaciados", "primera_ultima"]:
         raise FrameExtractorError(f"Modo de extracción inválido: {modo_extraccion}")
 
+    _owns_cap = cap_session is None
     try:
         video_path_procesado = video_path
-        cap = cv2.VideoCapture(video_path)
-        can_decode_opencv = cap.isOpened()
-        first_read_ok = False
-        if can_decode_opencv:
-            first_read_ok, _ = cap.read()
-            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-            can_decode_opencv = bool(first_read_ok)
+        if cap_session is None:
+            cap_session = _CachedCapture(video_path)
 
+        can_decode_opencv = cap_session.can_decode
         metadata = probe_video_stream(video_path)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) if can_decode_opencv else int(metadata.get("total_frames", 0))
-        fps = float(cap.get(cv2.CAP_PROP_FPS)) if can_decode_opencv else float(metadata.get("fps", 0.0))
+        total_frames = cap_session.total_frames if can_decode_opencv else int(metadata.get("total_frames", 0))
+        fps = cap_session.fps if can_decode_opencv else float(metadata.get("fps", 0.0))
         if total_frames <= 0:
             total_frames = int(metadata.get("total_frames", 0))
         if fps <= 0:
             fps = float(metadata.get("fps", 0.0))
         duration = (total_frames / fps) if (fps > 0 and total_frames > 0) else float(metadata.get("duration", 0.0))
         if total_frames <= 0:
-            cap.release()
+            if _owns_cap:
+                cap_session.release()
             raise FrameExtractorError("No se pudo determinar el total de frames del vídeo")
         video_name = os.path.splitext(os.path.basename(video_path))[0]
 
@@ -304,22 +438,43 @@ def extract_main_frames(
         frames: List[np.ndarray] = []
         frame_metadata: List[Dict[str, Any]] = []
         fallback_ffmpeg_frames = 0
-        for idx, frame_pos in enumerate(frame_positions, start=1):
-            frame = None
-            ret = False
+
+        # Collect positions that need ffmpeg fallback in one batch
+        ffmpeg_needed: List[int] = []  # indices into frame_positions
+        opencv_frames: Dict[int, Optional[np.ndarray]] = {}
+
+        for idx_pos, frame_pos in enumerate(frame_positions):
+            frame: Optional[np.ndarray] = None
             if can_decode_opencv:
-                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_pos)
-                ret, frame = cap.read()
-            if not ret or frame is None:
-                if fps > 0:
-                    frame = _extract_single_frame_ffmpeg(video_path, frame_pos / fps)
-                elif duration > 0 and total_frames > 1:
-                    frame = _extract_single_frame_ffmpeg(video_path, (frame_pos / (total_frames - 1)) * duration)
-                ret = frame is not None
-                if ret:
-                    fallback_ffmpeg_frames += 1
+                frame = cap_session.read_frame(frame_pos)
+            if frame is None:
+                ffmpeg_needed.append(idx_pos)
+            else:
+                opencv_frames[idx_pos] = frame
+
+        # Batch extract any positions OpenCV could not decode
+        if ffmpeg_needed:
+            if fps > 0:
+                batch_ts = [frame_positions[i] / fps for i in ffmpeg_needed]
+            elif duration > 0 and total_frames > 1:
+                batch_ts = [(frame_positions[i] / (total_frames - 1)) * duration for i in ffmpeg_needed]
+            else:
+                batch_ts = []
+
+            if batch_ts:
+                batch_results = _extract_batch_frames_ffmpeg(video_path, batch_ts)
+                for list_idx, orig_idx in enumerate(ffmpeg_needed):
+                    f = batch_results[list_idx] if list_idx < len(batch_results) else None
+                    opencv_frames[orig_idx] = f
+
+        for idx, frame_pos in enumerate(frame_positions, start=1):
+            frame = opencv_frames.get(idx - 1)
+            ffmpeg_used = (idx - 1) in ffmpeg_needed and frame is not None
+            ret = frame is not None
+            if ffmpeg_used:
+                fallback_ffmpeg_frames += 1
             if ret:
-                frames.append(frame.copy())
+                frames.append(frame.copy())  # type: ignore[union-attr]
                 frame_metadata.append({
                     "position": frame_pos,
                     "timestamp": frame_pos / fps if fps > 0 else 0,
@@ -335,7 +490,8 @@ def extract_main_frames(
                         f"[MAIN][idx={idx:02d}][video_frame={frame_pos:06d}] -> DISCARDED (read_failed)"
                     )
 
-        cap.release()
+        if _owns_cap:
+            cap_session.release()
         if not frames:
             raise FrameExtractorError("No se pudieron extraer frames del vídeo")
 
@@ -393,43 +549,72 @@ def extract_secondary_frames(
     frame_positions: List[int],
     total_frames: int,
     paso_frames: int = 5,
+    cap_session: Optional[_CachedCapture] = None,
 ) -> List[List[Dict[str, Any]]]:
     """Extrae secuencias temporales 3-frame alrededor de cada posición principal."""
     secuencias: List[List[Dict[str, Any]]] = []
     metadata = probe_video_stream(video_path)
     fps = float(metadata.get("fps", 0.0))
     duration = float(metadata.get("duration", 0.0))
-    cap = cv2.VideoCapture(video_path)
-    cap_ok = cap.isOpened()
-    if cap_ok:
-        probe_ret, _ = cap.read()
-        cap_ok = bool(probe_ret)
-        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
+    _owns_cap = cap_session is None
+    if cap_session is None:
+        cap_session = _CachedCapture(video_path)
+    cap_ok = cap_session.can_decode
+
+    # Collect all window positions across all sequences that need ffmpeg fallback
+    all_window_positions: List[Tuple[int, int]] = []  # (seq_idx, position)
+    window_sets: List[List[int]] = []
     for pos in frame_positions:
         posiciones_ventana = sorted({
             max(0, pos - paso_frames),
             pos,
             min(total_frames - 1, pos + paso_frames),
         })
-        seq: List[Dict[str, Any]] = []
-        for p in posiciones_ventana:
-            frame = None
-            ret = False
+        window_sets.append(posiciones_ventana)
+
+    # First pass: read via OpenCV where possible; record which need ffmpeg
+    all_seq_frames: List[List[Optional[np.ndarray]]] = []
+    ffmpeg_needed_positions: List[Tuple[int, int, float]] = []  # (seq_idx, win_idx, timestamp)
+
+    for seq_idx, posiciones_ventana in enumerate(window_sets):
+        seq_frames: List[Optional[np.ndarray]] = []
+        for win_idx, p in enumerate(posiciones_ventana):
+            frame: Optional[np.ndarray] = None
             if cap_ok:
-                cap.set(cv2.CAP_PROP_POS_FRAMES, p)
-                ret, frame = cap.read()
-            if (not ret or frame is None) and total_frames > 0:
+                frame = cap_session.read_frame(p)
+            if frame is None and total_frames > 0:
                 if fps > 0:
-                    frame = _extract_single_frame_ffmpeg(video_path, p / fps)
+                    ts = p / fps
                 elif duration > 0 and total_frames > 1:
-                    frame = _extract_single_frame_ffmpeg(video_path, (p / (total_frames - 1)) * duration)
-                ret = frame is not None
-            if ret:
+                    ts = (p / (total_frames - 1)) * duration
+                else:
+                    ts = None
+                if ts is not None:
+                    ffmpeg_needed_positions.append((seq_idx, win_idx, ts))
+            seq_frames.append(frame)
+        all_seq_frames.append(seq_frames)
+
+    # Batch ffmpeg for all missing frames
+    if ffmpeg_needed_positions:
+        batch_ts = [t for (_, _, t) in ffmpeg_needed_positions]
+        batch_results = _extract_batch_frames_ffmpeg(video_path, batch_ts)
+        for list_idx, (seq_idx, win_idx, _) in enumerate(ffmpeg_needed_positions):
+            f = batch_results[list_idx] if list_idx < len(batch_results) else None
+            all_seq_frames[seq_idx][win_idx] = f
+
+    # Build output structure
+    for seq_idx, posiciones_ventana in enumerate(window_sets):
+        seq: List[Dict[str, Any]] = []
+        for win_idx, p in enumerate(posiciones_ventana):
+            frame = all_seq_frames[seq_idx][win_idx]
+            if frame is not None:
                 seq.append({"position": p, "frame": frame.copy(), "valid": True})
             else:
                 seq.append({"position": p, "frame": None, "valid": False})
         secuencias.append(seq)
 
-    cap.release()
+    if _owns_cap:
+        cap_session.release()
     return secuencias
+

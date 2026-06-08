@@ -220,10 +220,15 @@ The detector (`detector/pipeline.py`) runs without ML models:
 | Detected projection | Conversion action |
 |---|---|
 | `equirectangular` | Skipped — already target format |
-| `stereo_equi` | Skipped — geometry is already equirectangular |
+| `stereo_equi` | Currently skipped — geometry is already equirectangular (see note below for expected behavior) |
 | `eac` | Converted via `ffmpeg v360=eac:equirect` |
 | `cubic` | Converted via `ffmpeg v360=c3x2:equirect` |
 | `unknown` | **Falls back to `eac`** and conversion is attempted |
+
+For `stereo_equi`, the expected outcome is conversion to mono
+equirectangular output for both stereo packing variants (top-bottom and
+left-right). The current implementation still takes the skip path for
+`stereo_equi`.
 
 The `unknown → eac` fallback is applied in `workflows/unified_pipeline.py`
 `_stage_convert_to_equirectangular` with a `WARNING` log entry, so the

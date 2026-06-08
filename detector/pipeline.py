@@ -40,6 +40,7 @@ from .video_io import (
     convert_video_codec,
     extract_main_frames,
     extract_secondary_frames,
+    open_video_capture,
     probe_video_stream,
 )
 
@@ -909,21 +910,35 @@ def run_detection_pipeline(
 
         total_frames_video = 0
         video_path_procesado = video_path
+        _secondary_raw_precomputed: Optional[List[List[Dict[str, Any]]]] = None
         if frames is None:
-            extraction_result = extract_main_frames(
-                video_path,
-                num_frames=num_frames,
-                modo_extraccion="equiespaciados",
-                guardar_frames=False,
-                save_image_fn=save_frame_debug,
-                log_success_fn=log_success,
-                log_discard_fn=log_discard,
-            )
-            frames = extraction_result.get("frames", [])
-            frames_metadata = extraction_result.get("frames_metadata", [])
-            total_frames_video = extraction_result.get("total_frames", 0)
-            video_path_procesado = extraction_result.get("video_path_procesado", video_path)
-            video_name = extraction_result.get("video_name", "video")
+            with open_video_capture(video_path) as cap_session:
+                extraction_result = extract_main_frames(
+                    video_path,
+                    num_frames=num_frames,
+                    modo_extraccion="equiespaciados",
+                    guardar_frames=False,
+                    save_image_fn=save_frame_debug,
+                    log_success_fn=log_success,
+                    log_discard_fn=log_discard,
+                    cap_session=cap_session,
+                )
+                frames = extraction_result.get("frames", [])
+                frames_metadata = extraction_result.get("frames_metadata", [])
+                total_frames_video = extraction_result.get("total_frames", 0)
+                video_path_procesado = extraction_result.get("video_path_procesado", video_path)
+                video_name = extraction_result.get("video_name", "video")
+
+                if frames:
+                    _positions_for_sec = [m["position"] for m in frames_metadata] if frames_metadata else []
+                    if _positions_for_sec and total_frames_video > 0:
+                        _secondary_raw_precomputed = extract_secondary_frames(
+                            video_path_procesado,
+                            _positions_for_sec,
+                            total_frames_video,
+                            paso_frames=paso_frames_secundarios,
+                            cap_session=cap_session if video_path_procesado == video_path else None,
+                        )
         else:
             logger.info(f"Usando {len(frames)} frames pre-extraídos")
             if not video_name:
@@ -973,12 +988,15 @@ def run_detection_pipeline(
         positions_principales = [m["position"] for m in frames_metadata] if frames_metadata else []
         secuencias_secundarias: List[List[np.ndarray]] = []
         if positions_principales and total_frames_video > 0:
-            secondary_raw = extract_secondary_frames(
-                video_path_procesado,
-                positions_principales,
-                total_frames_video,
-                paso_frames=paso_frames_secundarios,
-            )
+            if _secondary_raw_precomputed is not None:
+                secondary_raw = _secondary_raw_precomputed
+            else:
+                secondary_raw = extract_secondary_frames(
+                    video_path_procesado,
+                    positions_principales,
+                    total_frames_video,
+                    paso_frames=paso_frames_secundarios,
+                )
             for main_idx, seq_raw in enumerate(secondary_raw, start=1):
                 seq: List[np.ndarray] = []
                 seq_group_dir = None
@@ -1006,6 +1024,7 @@ def run_detection_pipeline(
         else:
             if not positions_principales:
                 logger.warning("Sin metadatos de posición: análisis de movimiento secundario omitido.")
+
 
         total_frames_extraidos = len(frames)
         frames_analyzed = 0

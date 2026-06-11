@@ -128,6 +128,11 @@ _HARDWARE_BACKEND_CONTEXT_SIGNALS: tuple = (
     "cuda",
 )
 
+_DEFAULT_CONVERSION_TARGET_HEIGHT = 2160
+_DEFAULT_CONVERSION_TARGET_WIDTH = 4320
+_DEFAULT_CONVERSION_CRF = 16
+_DEFAULT_CONVERSION_PRESET = "medium"
+
 
 def _normalize_positive_even(value: int, fallback: int) -> int:
     """Return a positive even integer with a safe fallback."""
@@ -143,7 +148,7 @@ def _normalize_positive_even(value: int, fallback: int) -> int:
 
 
 def _normalize_crf(value: Any, fallback: int = 16) -> int:
-    """Return a valid libx264 CRF value in the [0, 51] range."""
+    """Return a valid libx264 CRF value in [0, 51], clamping out-of-range values."""
     try:
         crf = int(value)
     except (TypeError, ValueError):
@@ -164,15 +169,18 @@ def get_conversion_output_profile() -> Dict[str, Any]:
 
         cfg = get_settings()
         target_height = _normalize_positive_even(
-            getattr(cfg, "conversion_target_height", 2160),
-            2160,
+            getattr(cfg, "conversion_target_height", _DEFAULT_CONVERSION_TARGET_HEIGHT),
+            _DEFAULT_CONVERSION_TARGET_HEIGHT,
         )
         target_width = _normalize_positive_even(
             getattr(cfg, "conversion_target_width", target_height * 2),
             target_height * 2,
         )
-        crf = _normalize_crf(getattr(cfg, "conversion_crf", 16), fallback=16)
-        preset = _normalize_preset(getattr(cfg, "conversion_preset", "medium"), fallback="medium")
+        crf = _normalize_crf(getattr(cfg, "conversion_crf", _DEFAULT_CONVERSION_CRF), fallback=_DEFAULT_CONVERSION_CRF)
+        preset = _normalize_preset(
+            getattr(cfg, "conversion_preset", _DEFAULT_CONVERSION_PRESET),
+            fallback=_DEFAULT_CONVERSION_PRESET,
+        )
         return {
             "target_width": target_width,
             "target_height": target_height,
@@ -181,10 +189,10 @@ def get_conversion_output_profile() -> Dict[str, Any]:
         }
     except (ImportError, AttributeError, TypeError, ValueError):
         return {
-            "target_width": 4320,
-            "target_height": 2160,
-            "crf": 16,
-            "preset": "medium",
+            "target_width": _DEFAULT_CONVERSION_TARGET_WIDTH,
+            "target_height": _DEFAULT_CONVERSION_TARGET_HEIGHT,
+            "crf": _DEFAULT_CONVERSION_CRF,
+            "preset": _DEFAULT_CONVERSION_PRESET,
         }
 
 
@@ -366,8 +374,8 @@ def _is_audio_failure(stderr: str) -> bool:
 
 def build_v360_filter_for_projection(
     projection_type: str,
-    target_width: int = 4320,
-    target_height: int = 2160,
+    target_width: int = _DEFAULT_CONVERSION_TARGET_WIDTH,
+    target_height: int = _DEFAULT_CONVERSION_TARGET_HEIGHT,
 ) -> Optional[str]:
     """Return the ffmpeg v360 video-filter string for the given projection type.
 
@@ -390,8 +398,8 @@ def build_v360_filter_for_projection(
     v360_in = _V360_INPUT_FORMAT.get(projection_type)
     if v360_in is None:
         return None
-    safe_width = _normalize_positive_even(target_width, 4320)
-    safe_height = _normalize_positive_even(target_height, 2160)
+    safe_width = _normalize_positive_even(target_width, _DEFAULT_CONVERSION_TARGET_WIDTH)
+    safe_height = _normalize_positive_even(target_height, _DEFAULT_CONVERSION_TARGET_HEIGHT)
     # libx264 with yuv420p requires even width/height. Some source dimensions
     # can produce odd outputs after v360, so pad to even dimensions without
     # geometric distortion.
@@ -408,10 +416,10 @@ def build_ffmpeg_command_for_projection(
     projection_type: str,
     drop_audio: bool = False,
     video_encoder: Optional[str] = None,
-    target_width: int = 4320,
-    target_height: int = 2160,
-    crf: int = 16,
-    preset: str = "medium",
+    target_width: int = _DEFAULT_CONVERSION_TARGET_WIDTH,
+    target_height: int = _DEFAULT_CONVERSION_TARGET_HEIGHT,
+    crf: int = _DEFAULT_CONVERSION_CRF,
+    preset: str = _DEFAULT_CONVERSION_PRESET,
 ) -> List[str]:
     """Build an ffmpeg command list to convert *input_path* to equirectangular.
 
@@ -484,8 +492,8 @@ def build_ffmpeg_command_for_projection(
             "-pix_fmt", "yuv420p",
         ]
         if selected_encoder == "libx264":
-            safe_crf = _normalize_crf(crf, fallback=16)
-            safe_preset = _normalize_preset(preset, fallback="medium")
+            safe_crf = _normalize_crf(crf, fallback=_DEFAULT_CONVERSION_CRF)
+            safe_preset = _normalize_preset(preset, fallback=_DEFAULT_CONVERSION_PRESET)
             cmd += ["-preset", safe_preset, "-crf", str(safe_crf)]
         if drop_audio:
             # Video-only output: drop audio (safe fallback for ambisonic /

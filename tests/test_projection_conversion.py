@@ -111,6 +111,28 @@ class ProjectionConversionRetryTests(unittest.TestCase):
         self.assertEqual(profile["crf"], 14)
         self.assertEqual(profile["preset"], "slow")
 
+    @patch("config.settings.get_settings", side_effect=ImportError("settings unavailable"))
+    def test_conversion_output_profile_falls_back_when_settings_unavailable(self, _mock_get_settings):
+        profile = get_conversion_output_profile()
+        self.assertEqual(profile["target_width"], 4320)
+        self.assertEqual(profile["target_height"], 2160)
+        self.assertEqual(profile["crf"], 16)
+        self.assertEqual(profile["preset"], "medium")
+
+    @patch("config.settings.get_settings")
+    def test_conversion_output_profile_normalizes_invalid_values(self, mock_get_settings):
+        mock_get_settings.return_value = types.SimpleNamespace(
+            conversion_target_width="invalid",
+            conversion_target_height=-1,
+            conversion_crf="999",
+            conversion_preset="",
+        )
+        profile = get_conversion_output_profile()
+        self.assertEqual(profile["target_width"], 4320)
+        self.assertEqual(profile["target_height"], 2160)
+        self.assertEqual(profile["crf"], 51)
+        self.assertEqual(profile["preset"], "medium")
+
     def test_hardware_encoder_runtime_failure_detected_for_nvenc_cuda_error(self):
         stderr = "[h264_nvenc @ 0x1] Cannot load libcuda.so.1\nError while opening encoder"
         self.assertTrue(_is_hardware_encoder_runtime_failure(stderr, "h264_nvenc"))

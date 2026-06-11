@@ -196,12 +196,13 @@ class Settings:
         if _conversion_target_height <= 0:
             _conversion_target_height = 2160
         self.conversion_target_height: int = _conversion_target_height
+        _conversion_default_width = max(2, self.conversion_target_height * 2)
         self.conversion_target_width: int = _env_int(
             "VPD_CONVERSION_TARGET_WIDTH",
-            max(2, self.conversion_target_height * 2),
+            _conversion_default_width,
         )
         if self.conversion_target_width <= 0:
-            self.conversion_target_width = max(2, self.conversion_target_height * 2)
+            self.conversion_target_width = _conversion_default_width
         self.conversion_crf: int = _env_int("VPD_CONVERSION_CRF", 16)
         self.conversion_preset: str = _env_str("VPD_CONVERSION_PRESET", "medium")
         self.motion_feature_tiers: dict = {

@@ -131,7 +131,10 @@ _HARDWARE_BACKEND_CONTEXT_SIGNALS: tuple = (
 
 def _normalize_positive_even(value: int, fallback: int) -> int:
     """Return a positive even integer with a safe fallback."""
-    v = int(value) if isinstance(value, int) else fallback
+    try:
+        v = int(value)
+    except (TypeError, ValueError):
+        v = fallback
     if v <= 0:
         v = fallback
     if v % 2 != 0:
@@ -146,14 +149,17 @@ def get_conversion_output_profile() -> Dict[str, Any]:
 
         cfg = get_settings()
         target_height = _normalize_positive_even(
-            int(getattr(cfg, "conversion_target_height", 2160)),
+            getattr(cfg, "conversion_target_height", 2160),
             2160,
         )
         target_width = _normalize_positive_even(
-            int(getattr(cfg, "conversion_target_width", target_height * 2)),
+            getattr(cfg, "conversion_target_width", target_height * 2),
             target_height * 2,
         )
-        crf = int(getattr(cfg, "conversion_crf", 16))
+        try:
+            crf = int(getattr(cfg, "conversion_crf", 16))
+        except (TypeError, ValueError):
+            crf = 16
         if crf < 0:
             crf = 0
         if crf > 51:

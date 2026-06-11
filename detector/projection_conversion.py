@@ -142,6 +142,21 @@ def _normalize_positive_even(value: int, fallback: int) -> int:
     return max(2, v)
 
 
+def _normalize_crf(value: Any, fallback: int = 16) -> int:
+    """Return a valid libx264 CRF value in the [0, 51] range."""
+    try:
+        crf = int(value)
+    except (TypeError, ValueError):
+        crf = fallback
+    return min(51, max(0, crf))
+
+
+def _normalize_preset(value: Any, fallback: str = "medium") -> str:
+    """Return a non-empty ffmpeg preset string."""
+    preset = str(value).strip() if value is not None else ""
+    return preset or fallback
+
+
 def get_conversion_output_profile() -> Dict[str, Any]:
     """Return conversion output profile from centralized settings."""
     try:
@@ -156,22 +171,15 @@ def get_conversion_output_profile() -> Dict[str, Any]:
             getattr(cfg, "conversion_target_width", target_height * 2),
             target_height * 2,
         )
-        try:
-            crf = int(getattr(cfg, "conversion_crf", 16))
-        except (TypeError, ValueError):
-            crf = 16
-        if crf < 0:
-            crf = 0
-        if crf > 51:
-            crf = 51
-        preset = str(getattr(cfg, "conversion_preset", "medium")).strip() or "medium"
+        crf = _normalize_crf(getattr(cfg, "conversion_crf", 16), fallback=16)
+        preset = _normalize_preset(getattr(cfg, "conversion_preset", "medium"), fallback="medium")
         return {
             "target_width": target_width,
             "target_height": target_height,
             "crf": crf,
             "preset": preset,
         }
-    except Exception:
+    except (ImportError, AttributeError, TypeError, ValueError):
         return {
             "target_width": 4320,
             "target_height": 2160,
@@ -476,8 +484,8 @@ def build_ffmpeg_command_for_projection(
             "-pix_fmt", "yuv420p",
         ]
         if selected_encoder == "libx264":
-            safe_crf = min(51, max(0, int(crf)))
-            safe_preset = str(preset).strip() or "medium"
+            safe_crf = _normalize_crf(crf, fallback=16)
+            safe_preset = _normalize_preset(preset, fallback="medium")
             cmd += ["-preset", safe_preset, "-crf", str(safe_crf)]
         if drop_audio:
             # Video-only output: drop audio (safe fallback for ambisonic /

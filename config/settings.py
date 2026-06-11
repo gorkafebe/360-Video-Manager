@@ -192,11 +192,16 @@ class Settings:
         self.geometry_evidence_weight: float = _env_float("VPD_GEOMETRY_EVIDENCE_WEIGHT", 0.20)
         self.motion_rollout_profile: str = _env_str("VPD_MOTION_ROLLOUT_PROFILE", "high_accuracy")
         self.force_full_codec_normalization: bool = _env_bool("VPD_FORCE_FULL_CODEC_NORMALIZATION", False)
-        self.conversion_target_height: int = _env_int("VPD_CONVERSION_TARGET_HEIGHT", 2160)
+        _conversion_target_height = _env_int("VPD_CONVERSION_TARGET_HEIGHT", 2160)
+        if _conversion_target_height <= 0:
+            _conversion_target_height = 2160
+        self.conversion_target_height: int = _conversion_target_height
         self.conversion_target_width: int = _env_int(
             "VPD_CONVERSION_TARGET_WIDTH",
             max(2, self.conversion_target_height * 2),
         )
+        if self.conversion_target_width <= 0:
+            self.conversion_target_width = max(2, self.conversion_target_height * 2)
         self.conversion_crf: int = _env_int("VPD_CONVERSION_CRF", 16)
         self.conversion_preset: str = _env_str("VPD_CONVERSION_PRESET", "medium")
         self.motion_feature_tiers: dict = {

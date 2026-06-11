@@ -198,17 +198,6 @@ def get_conversion_output_profile() -> Dict[str, Any]:
             "crf": _DEFAULT_CONVERSION_CRF,
             "preset": _DEFAULT_CONVERSION_PRESET,
         }
-    except (TypeError, ValueError):
-        logger.warning(
-            "[CONVERSION] Invalid conversion profile values, using default output profile.",
-            exc_info=True,
-        )
-        return {
-            "target_width": _DEFAULT_CONVERSION_TARGET_WIDTH,
-            "target_height": _DEFAULT_CONVERSION_TARGET_HEIGHT,
-            "crf": _DEFAULT_CONVERSION_CRF,
-            "preset": _DEFAULT_CONVERSION_PRESET,
-        }
 
 
 @lru_cache(maxsize=1)

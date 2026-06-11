@@ -198,10 +198,7 @@ class Settings:
         if _conversion_target_height <= 0:
             _conversion_target_height = 2160
         self.conversion_target_height: int = _conversion_target_height
-        _conversion_default_width = max(
-            self._EQUIRECT_MONO_ASPECT_RATIO,
-            self.conversion_target_height * self._EQUIRECT_MONO_ASPECT_RATIO,
-        )
+        _conversion_default_width = self.conversion_target_height * self._EQUIRECT_MONO_ASPECT_RATIO
         self.conversion_target_width: int = _env_int(
             "VPD_CONVERSION_TARGET_WIDTH",
             _conversion_default_width,

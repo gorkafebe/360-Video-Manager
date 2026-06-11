@@ -119,6 +119,8 @@ def _env_str(name: str, default: str) -> str:
 class Settings:
     """Immutable snapshot of all application configuration values."""
 
+    _EQUIRECT_MONO_ASPECT_RATIO = 2
+
     def __init__(self) -> None:
         # Resolve project root from env or by walking up from this file.
         _auto_root = str(Path(__file__).resolve().parent.parent)
@@ -196,7 +198,10 @@ class Settings:
         if _conversion_target_height <= 0:
             _conversion_target_height = 2160
         self.conversion_target_height: int = _conversion_target_height
-        _conversion_default_width = max(2, self.conversion_target_height * 2)
+        _conversion_default_width = max(
+            self._EQUIRECT_MONO_ASPECT_RATIO,
+            self.conversion_target_height * self._EQUIRECT_MONO_ASPECT_RATIO,
+        )
         self.conversion_target_width: int = _env_int(
             "VPD_CONVERSION_TARGET_WIDTH",
             _conversion_default_width,

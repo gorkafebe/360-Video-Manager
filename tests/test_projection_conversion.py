@@ -32,6 +32,7 @@ from detector.projection_conversion import (
     build_ffmpeg_command_for_projection,
     build_v360_filter_for_projection,
     convert_detected_projection_to_equirectangular,
+    get_conversion_output_profile,
 )
 
 
@@ -40,7 +41,7 @@ class ProjectionConversionCommandTests(unittest.TestCase):
         filt = build_v360_filter_for_projection("eac")
         self.assertEqual(
             filt,
-            "v360=eac:equirect,pad=ceil(iw/2)*2:ceil(ih/2)*2:(ow-iw)/2:(oh-ih)/2",
+            "v360=eac:equirect,pad=ceil(iw/2)*2:ceil(ih/2)*2:(ow-iw)/2:(oh-ih)/2,scale=4320:2160:flags=lanczos",
         )
 
     def test_build_ffmpeg_command_uses_padded_v360_filter(self):
@@ -54,11 +55,32 @@ class ProjectionConversionCommandTests(unittest.TestCase):
         vf = cmd[cmd.index("-vf") + 1]
         self.assertIn("v360=c3x2:equirect", vf)
         self.assertIn("pad=ceil(iw/2)*2:ceil(ih/2)*2:(ow-iw)/2:(oh-ih)/2", vf)
+        self.assertIn("scale=4320:2160:flags=lanczos", vf)
+        self.assertIn("-preset", cmd)
+        self.assertIn("medium", cmd)
+        self.assertIn("-crf", cmd)
+        self.assertIn("16", cmd)
         # Hardware acceleration must NOT be present when the v360 software filter
         # is used: hardware-decoded frames stay in device memory and cannot be
         # consumed by the software filter, which would cause ffmpeg to create an
         # empty output file and exit with an error.
         self.assertNotIn("-hwaccel", cmd)
+
+    def test_build_ffmpeg_command_allows_target_profile_override(self):
+        with patch("detector.projection_conversion.detect_ffmpeg_h264_encoder", return_value="libx264"):
+            cmd = build_ffmpeg_command_for_projection(
+                "/tmp/input.mp4",
+                "/tmp/output.mp4",
+                "eac",
+                target_width=4096,
+                target_height=2048,
+                crf=14,
+                preset="slow",
+            )
+        vf = cmd[cmd.index("-vf") + 1]
+        self.assertIn("scale=4096:2048:flags=lanczos", vf)
+        self.assertIn("slow", cmd)
+        self.assertIn("14", cmd)
 
     def test_build_ffmpeg_command_stream_copy_uses_hwaccel(self):
         """Stream-copy path (no v360 filter) may safely use hardware acceleration."""
@@ -75,6 +97,20 @@ class ProjectionConversionCommandTests(unittest.TestCase):
 
 
 class ProjectionConversionRetryTests(unittest.TestCase):
+    @patch("config.settings.get_settings")
+    def test_conversion_output_profile_loaded_from_settings(self, mock_get_settings):
+        mock_get_settings.return_value = types.SimpleNamespace(
+            conversion_target_width=4096,
+            conversion_target_height=2048,
+            conversion_crf=14,
+            conversion_preset="slow",
+        )
+        profile = get_conversion_output_profile()
+        self.assertEqual(profile["target_width"], 4096)
+        self.assertEqual(profile["target_height"], 2048)
+        self.assertEqual(profile["crf"], 14)
+        self.assertEqual(profile["preset"], "slow")
+
     def test_hardware_encoder_runtime_failure_detected_for_nvenc_cuda_error(self):
         stderr = "[h264_nvenc @ 0x1] Cannot load libcuda.so.1\nError while opening encoder"
         self.assertTrue(_is_hardware_encoder_runtime_failure(stderr, "h264_nvenc"))

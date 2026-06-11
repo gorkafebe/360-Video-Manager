@@ -129,6 +129,51 @@ _HARDWARE_BACKEND_CONTEXT_SIGNALS: tuple = (
 )
 
 
+def _normalize_positive_even(value: int, fallback: int) -> int:
+    """Return a positive even integer with a safe fallback."""
+    v = int(value) if isinstance(value, int) else fallback
+    if v <= 0:
+        v = fallback
+    if v % 2 != 0:
+        v += 1
+    return max(2, v)
+
+
+def get_conversion_output_profile() -> Dict[str, Any]:
+    """Return conversion output profile from centralized settings."""
+    try:
+        from config.settings import get_settings
+
+        cfg = get_settings()
+        target_height = _normalize_positive_even(
+            int(getattr(cfg, "conversion_target_height", 2160)),
+            2160,
+        )
+        target_width = _normalize_positive_even(
+            int(getattr(cfg, "conversion_target_width", target_height * 2)),
+            target_height * 2,
+        )
+        crf = int(getattr(cfg, "conversion_crf", 16))
+        if crf < 0:
+            crf = 0
+        if crf > 51:
+            crf = 51
+        preset = str(getattr(cfg, "conversion_preset", "medium")).strip() or "medium"
+        return {
+            "target_width": target_width,
+            "target_height": target_height,
+            "crf": crf,
+            "preset": preset,
+        }
+    except Exception:
+        return {
+            "target_width": 4320,
+            "target_height": 2160,
+            "crf": 16,
+            "preset": "medium",
+        }
+
+
 @lru_cache(maxsize=1)
 def detect_ffmpeg_h264_encoder() -> str:
     """Detect best usable ffmpeg H.264 encoder, preferring hardware backends."""
@@ -305,7 +350,11 @@ def _is_audio_failure(stderr: str) -> bool:
     return False
 
 
-def build_v360_filter_for_projection(projection_type: str) -> Optional[str]:
+def build_v360_filter_for_projection(
+    projection_type: str,
+    target_width: int = 4320,
+    target_height: int = 2160,
+) -> Optional[str]:
     """Return the ffmpeg v360 video-filter string for the given projection type.
 
     Returns ``None`` for types that do not require a geometric transform
@@ -327,12 +376,15 @@ def build_v360_filter_for_projection(projection_type: str) -> Optional[str]:
     v360_in = _V360_INPUT_FORMAT.get(projection_type)
     if v360_in is None:
         return None
+    safe_width = _normalize_positive_even(target_width, 4320)
+    safe_height = _normalize_positive_even(target_height, 2160)
     # libx264 with yuv420p requires even width/height. Some source dimensions
     # can produce odd outputs after v360, so pad to even dimensions without
     # geometric distortion.
     return (
         f"v360={v360_in}:equirect,"
-        "pad=ceil(iw/2)*2:ceil(ih/2)*2:(ow-iw)/2:(oh-ih)/2"
+        "pad=ceil(iw/2)*2:ceil(ih/2)*2:(ow-iw)/2:(oh-ih)/2,"
+        f"scale={safe_width}:{safe_height}:flags=lanczos"
     )
 
 
@@ -342,6 +394,10 @@ def build_ffmpeg_command_for_projection(
     projection_type: str,
     drop_audio: bool = False,
     video_encoder: Optional[str] = None,
+    target_width: int = 4320,
+    target_height: int = 2160,
+    crf: int = 16,
+    preset: str = "medium",
 ) -> List[str]:
     """Build an ffmpeg command list to convert *input_path* to equirectangular.
 
@@ -383,7 +439,11 @@ def build_ffmpeg_command_for_projection(
     Raises:
         ValueError: If the projection type is not supported for conversion.
     """
-    v360_filter = build_v360_filter_for_projection(projection_type)
+    v360_filter = build_v360_filter_for_projection(
+        projection_type,
+        target_width=target_width,
+        target_height=target_height,
+    )
     if v360_filter is None and projection_type not in _SKIP_PROJECTION_TYPES:
         raise ValueError(
             f"No ffmpeg conversion strategy defined for projection type: {projection_type!r}"
@@ -410,7 +470,9 @@ def build_ffmpeg_command_for_projection(
             "-pix_fmt", "yuv420p",
         ]
         if selected_encoder == "libx264":
-            cmd += ["-preset", "veryfast", "-crf", "18"]
+            safe_crf = min(51, max(0, int(crf)))
+            safe_preset = str(preset).strip() or "medium"
+            cmd += ["-preset", safe_preset, "-crf", str(safe_crf)]
         if drop_audio:
             # Video-only output: drop audio (safe fallback for ambisonic /
             # unsupported channel layout streams).
@@ -588,8 +650,8 @@ def convert_detected_projection_to_equirectangular(
     - **unknown**: skip, reason ``projection_unknown``
     - **equirectangular**: skip, reason ``already_equirectangular``
     - **stereo_equi**: skip, reason ``already_equirectangular_stereo_layout``
-    - **eac**: convert via ``ffmpeg v360=e:equirect``
-    - **cubic**: convert via ``ffmpeg v360=c6x1:equirect``
+    - **eac**: convert via ``ffmpeg v360=eac:equirect`` + output profile scale
+    - **cubic**: convert via ``ffmpeg v360=c3x2:equirect`` + output profile scale
 
     The result dict is always safe to return even when ffmpeg is missing or
     the conversion fails — detection results are never affected.
@@ -696,7 +758,16 @@ def convert_detected_projection_to_equirectangular(
         )
 
     try:
-        cmd = build_ffmpeg_command_for_projection(video_path, output_path, projection_type)
+        profile = get_conversion_output_profile()
+        cmd = build_ffmpeg_command_for_projection(
+            video_path,
+            output_path,
+            projection_type,
+            target_width=int(profile["target_width"]),
+            target_height=int(profile["target_height"]),
+            crf=int(profile["crf"]),
+            preset=str(profile["preset"]),
+        )
     except ValueError as exc:
         logger.error("[CONVERSION] Cannot build ffmpeg command: %s", exc)
         return _make_failure_result(
@@ -734,6 +805,10 @@ def convert_detected_projection_to_equirectangular(
                 output_path,
                 projection_type,
                 video_encoder="libx264",
+                target_width=int(profile["target_width"]),
+                target_height=int(profile["target_height"]),
+                crf=int(profile["crf"]),
+                preset=str(profile["preset"]),
             )
             cmd = fallback_cmd
             ffmpeg_result = run_ffmpeg_command(cmd)

@@ -254,6 +254,19 @@ layouts. The conversion layer:
 4. A conversion failure never fails the overall job — detection results are
    always returned.
 
+**Output profile for server compatibility**
+
+When conversion runs (`eac`/`cubic`, or `unknown -> eac` fallback), output is
+forced to a mono equirectangular profile compatible with high-quality server
+variants (such as `2160_playlist`):
+
+- Target resolution: `4320x2160` (2:1 equirectangular)
+- Video encoder quality (`libx264` path): `-preset medium -crf 16`
+
+Both resolution and quality are configurable through environment variables
+(`VPD_CONVERSION_TARGET_WIDTH`, `VPD_CONVERSION_TARGET_HEIGHT`,
+`VPD_CONVERSION_PRESET`, `VPD_CONVERSION_CRF`).
+
 ---
 
 ## Projection types
@@ -327,6 +340,10 @@ root. Defaults shown are the values used when a variable is not set.
 | `VPD_GEOMETRY_EVIDENCE_WEIGHT` | `0.20` | Blend weight for geometry evidence in EAC-vs-cubic scoring |
 | `VPD_MOTION_ROLLOUT_PROFILE` | `high_accuracy` | Motion profile: `baseline`, `robust`, `high_accuracy` |
 | `VPD_FORCE_FULL_CODEC_NORMALIZATION` | `false` | Re-enable legacy full-file pre-normalization transcode before detection |
+| `VPD_CONVERSION_TARGET_HEIGHT` | `2160` | Target converted equirectangular output height in pixels |
+| `VPD_CONVERSION_TARGET_WIDTH` | `4320` | Target converted equirectangular output width in pixels |
+| `VPD_CONVERSION_CRF` | `16` | libx264 CRF used for geometric conversion quality |
+| `VPD_CONVERSION_PRESET` | `medium` | libx264 preset used for geometric conversion |
 
 ### Motion rollout profile behavior
 

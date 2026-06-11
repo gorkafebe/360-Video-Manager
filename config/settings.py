@@ -32,6 +32,10 @@ VPD_ENABLE_GEOMETRY_EVIDENCE  Enable geometry quality evidence fusion (default: 
 VPD_GEOMETRY_EVIDENCE_WEIGHT  Geometry evidence blend weight (default: 0.2).
 VPD_MOTION_ROLLOUT_PROFILE  Motion feature profile: baseline|robust|high_accuracy (default: high_accuracy).
 VPD_FORCE_FULL_CODEC_NORMALIZATION  Force legacy full-file pre-normalization transcode before detection (default: false).
+VPD_CONVERSION_TARGET_HEIGHT  Target equirectangular output height in pixels (default: 2160).
+VPD_CONVERSION_TARGET_WIDTH   Target equirectangular output width in pixels (default: 2x target height).
+VPD_CONVERSION_CRF            libx264 CRF for geometric conversion (default: 16).
+VPD_CONVERSION_PRESET         libx264 preset for geometric conversion (default: medium).
 DOWNLOADS_DIR           Override default download directory.
 """
 
@@ -188,6 +192,13 @@ class Settings:
         self.geometry_evidence_weight: float = _env_float("VPD_GEOMETRY_EVIDENCE_WEIGHT", 0.20)
         self.motion_rollout_profile: str = _env_str("VPD_MOTION_ROLLOUT_PROFILE", "high_accuracy")
         self.force_full_codec_normalization: bool = _env_bool("VPD_FORCE_FULL_CODEC_NORMALIZATION", False)
+        self.conversion_target_height: int = _env_int("VPD_CONVERSION_TARGET_HEIGHT", 2160)
+        self.conversion_target_width: int = _env_int(
+            "VPD_CONVERSION_TARGET_WIDTH",
+            max(2, self.conversion_target_height * 2),
+        )
+        self.conversion_crf: int = _env_int("VPD_CONVERSION_CRF", 16)
+        self.conversion_preset: str = _env_str("VPD_CONVERSION_PRESET", "medium")
         self.motion_feature_tiers: dict = {
             "tier_a_features": [
                 "canny_morphology_houghlinesp",

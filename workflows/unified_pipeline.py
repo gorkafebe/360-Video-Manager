@@ -90,8 +90,6 @@ class JobOptions:
         Existing MediaCMS playlist name or ID to add the video to.
     upload_new_playlist
         When set, create a new playlist with this name.
-    upload_category
-        Existing MediaCMS category ID to assign to the uploaded video.
     upload_tags
         Optional personalized tags to attach to the uploaded video.
     save_manifest
@@ -115,7 +113,6 @@ class JobOptions:
     upload_description: str = ""
     upload_playlist: Optional[str] = None
     upload_new_playlist: Optional[str] = None
-    upload_category: Optional[str] = None
     upload_tags: Optional[List[str]] = None
     save_manifest: bool = True
     progress_callback: Optional[Callable] = None
@@ -321,7 +318,6 @@ def _stage_upload(
     description: str,
     playlist: Optional[str],
     new_playlist: Optional[str],
-    category: Optional[str],
     tags: Optional[List[str]],
 ) -> UploadResult:
     """Upload *video_path* to MediaCMS."""
@@ -335,7 +331,6 @@ def _stage_upload(
             description=description,
             playlist_id=playlist,
             new_playlist_name=new_playlist,
-            category_id=category,
             tags=tags,
         )
     except MediaCMSError as exc:
@@ -447,13 +442,48 @@ def process_video_job(options: JobOptions) -> JobResult:
         # Stage 5: Projection detection
         # ------------------------------------------------------------------ #
         debug_dir = cfg.debug_output_dir
-        detection = _time_stage(
-            "detect_projection",
-            _stage_detect_projection,
-            normalized_path,
-            options.num_detection_frames,
-            debug_dir,
-        )
+        from detector.video_io import FrameExtractorError as DetectorFrameExtractorError
+
+        try:
+            detection = _time_stage(
+                "detect_projection",
+                _stage_detect_projection,
+                normalized_path,
+                options.num_detection_frames,
+                debug_dir,
+            )
+        except DetectorFrameExtractorError as exc:
+            extraction_code = getattr(exc, "code", "frame_extraction_error")
+            sampled_extraction_failure = extraction_code in {
+                "frame_extraction_timeout",
+                "frame_extraction_decode_failure",
+            }
+            if not force_full_codec_normalization and sampled_extraction_failure:
+                logger.warning(
+                    "[DETECT] Sampled extraction failed (%s). Applying one controlled codec-normalization retry.",
+                    extraction_code,
+                )
+                normalized_path = _time_stage("normalize_codec_retry", _stage_normalize_codec, video_path)
+                result.normalized_video_path = normalized_path
+                _log_codec_telemetry(normalized_path, "analysis_retry_input")
+                try:
+                    detection = _time_stage(
+                        "detect_projection_retry",
+                        _stage_detect_projection,
+                        normalized_path,
+                        options.num_detection_frames,
+                        debug_dir,
+                    )
+                except DetectorFrameExtractorError as retry_exc:
+                    retry_code = getattr(retry_exc, "code", "frame_extraction_error")
+                    raise WorkflowError(
+                        f"Projection detection failed after codec-normalization retry "
+                        f"(code={retry_code}): {retry_exc}"
+                    ) from retry_exc
+            else:
+                raise WorkflowError(
+                    f"Projection detection failed (code={extraction_code}): {exc}"
+                ) from exc
         result.projection_type = detection.get("projection_type", "unknown")
         result.confidence = float(detection.get("confidence", 0.0))
         raw_stats = detection.get("stats", {})
@@ -497,7 +527,6 @@ def process_video_job(options: JobOptions) -> JobResult:
                     description=options.upload_description,
                     playlist=options.upload_playlist,
                     new_playlist=options.upload_new_playlist,
-                    category=options.upload_category,
                     tags=options.upload_tags,
                 )
             else:

@@ -1,11 +1,14 @@
 import tempfile
+import subprocess
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from detector.video_io import (
+    FrameExtractorError,
     clear_probe_cache,
     extract_main_frames,
     extract_secondary_frames,
+    _extract_batch_frames_ffmpeg,
     open_video_capture,
 )
 
@@ -57,7 +60,10 @@ class VideoIOSamplingFallbackTests(unittest.TestCase):
             "fps": 24.0,
             "duration": 10.0,
         }
-        mock_extract_batch.return_value = [_FrameLike(), _FrameLike(), _FrameLike(), _FrameLike()]
+        mock_extract_batch.return_value = (
+            [_FrameLike(), _FrameLike(), _FrameLike(), _FrameLike()],
+            {"timeout": False, "error_code": None},
+        )
 
         with tempfile.NamedTemporaryFile(suffix=".mp4") as tmp_video:
             result = extract_main_frames(tmp_video.name, num_frames=4, guardar_frames=False)
@@ -124,7 +130,13 @@ class VideoIOSamplingFallbackTests(unittest.TestCase):
             "fps": 24.0,
             "duration": 5.0,
         }
-        mock_extract_batch.return_value = [_FrameLike(), _FrameLike()]
+
+        def _batch_return(_video_path, timestamps, **kwargs):
+            if kwargs.get("return_diagnostics"):
+                return ([_FrameLike() for _ in timestamps], {"timeout": False, "error_code": None})
+            return [_FrameLike() for _ in timestamps]
+
+        mock_extract_batch.side_effect = _batch_return
 
         with tempfile.NamedTemporaryFile(suffix=".mp4") as tmp_video:
             with open_video_capture(tmp_video.name) as cap_session:
@@ -140,6 +152,110 @@ class VideoIOSamplingFallbackTests(unittest.TestCase):
 
         # cv2.VideoCapture opened once (for the shared session), not once per function
         mock_capture.assert_called_once_with(tmp_video.name)
+
+    @patch("detector.video_io.subprocess.run")
+    def test_batch_ffmpeg_timeout_reports_diagnostics(self, mock_run):
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd=["ffmpeg"], timeout=120)
+
+        frames, diag = _extract_batch_frames_ffmpeg(
+            "/tmp/video.mp4",
+            [1.0, 2.0],
+            return_diagnostics=True,
+        )
+
+        self.assertEqual(frames, [None, None])
+        self.assertTrue(diag["timeout"])
+        self.assertEqual(diag["error_code"], "ffmpeg_batch_timeout")
+
+    @patch("detector.video_io.subprocess.run")
+    def test_batch_ffmpeg_timeout_without_diagnostics_returns_nones(self, mock_run):
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd=["ffmpeg"], timeout=120)
+
+        frames = _extract_batch_frames_ffmpeg("/tmp/video.mp4", [1.0, 2.0])
+
+        self.assertEqual(frames, [None, None])
+
+    @patch("detector.video_io.subprocess.run")
+    def test_batch_ffmpeg_empty_output_reports_diagnostics(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout=b"", stderr=b"")
+
+        frames, diag = _extract_batch_frames_ffmpeg(
+            "/tmp/video.mp4",
+            [1.0, 2.0],
+            return_diagnostics=True,
+        )
+
+        self.assertEqual(frames, [None, None])
+        self.assertFalse(diag["timeout"])
+        self.assertEqual(diag["error_code"], "ffmpeg_batch_no_output")
+
+    @patch("detector.video_io._extract_single_frame_ffmpeg_with_diagnostics")
+    @patch("detector.video_io._extract_batch_frames_ffmpeg")
+    @patch("detector.video_io.probe_video_stream")
+    @patch("detector.video_io.cv2.VideoCapture")
+    def test_extract_main_frames_falls_back_to_single_ffmpeg_after_batch_failure(
+        self,
+        mock_capture,
+        mock_probe,
+        mock_extract_batch,
+        mock_extract_single,
+    ):
+        mock_capture.return_value = _FakeCapture(opened=False)
+        mock_probe.return_value = {
+            "total_frames": 240,
+            "fps": 24.0,
+            "duration": 10.0,
+        }
+        mock_extract_batch.return_value = (
+            [None, None],
+            {"timeout": False, "error_code": "ffmpeg_batch_no_output"},
+        )
+        mock_extract_single.side_effect = [
+            (_FrameLike(), {"timeout": False, "decoded": True, "timestamp": 1.0}),
+            (_FrameLike(), {"timeout": False, "decoded": True, "timestamp": 2.0}),
+        ]
+
+        with tempfile.NamedTemporaryFile(suffix=".mp4") as tmp_video:
+            result = extract_main_frames(tmp_video.name, num_frames=2, guardar_frames=False)
+
+        self.assertEqual(len(result["frames"]), 2)
+        self.assertEqual(result["fallback_ffmpeg_single_frames"], 2)
+        self.assertEqual(result["fallback_ffmpeg_frames"], 0)
+        self.assertEqual(mock_extract_single.call_count, 2)
+
+    @patch("detector.video_io._extract_single_frame_ffmpeg_with_diagnostics")
+    @patch("detector.video_io._extract_batch_frames_ffmpeg")
+    @patch("detector.video_io.probe_video_stream")
+    @patch("detector.video_io.cv2.VideoCapture")
+    def test_extract_main_frames_hard_fail_includes_enriched_error_context(
+        self,
+        mock_capture,
+        mock_probe,
+        mock_extract_batch,
+        mock_extract_single,
+    ):
+        mock_capture.return_value = _FakeCapture(opened=False)
+        mock_probe.return_value = {
+            "total_frames": 240,
+            "fps": 24.0,
+            "duration": 10.0,
+        }
+        mock_extract_batch.return_value = (
+            [None, None],
+            {"timeout": True, "error_code": "ffmpeg_batch_timeout"},
+        )
+        mock_extract_single.side_effect = [
+            (None, {"timeout": True, "decoded": False, "timestamp": 1.0}),
+            (None, {"timeout": False, "decoded": False, "timestamp": 2.0}),
+        ]
+
+        with tempfile.NamedTemporaryFile(suffix=".mp4") as tmp_video:
+            with self.assertRaises(FrameExtractorError) as exc:
+                extract_main_frames(tmp_video.name, num_frames=2, guardar_frames=False)
+
+        self.assertEqual(exc.exception.code, "frame_extraction_timeout")
+        self.assertIn("attempts", exc.exception.details)
+        self.assertTrue(exc.exception.details["attempts"])
 
 
 if __name__ == "__main__":

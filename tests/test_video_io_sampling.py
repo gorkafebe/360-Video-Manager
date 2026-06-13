@@ -60,7 +60,10 @@ class VideoIOSamplingFallbackTests(unittest.TestCase):
             "fps": 24.0,
             "duration": 10.0,
         }
-        mock_extract_batch.return_value = [_FrameLike(), _FrameLike(), _FrameLike(), _FrameLike()]
+        mock_extract_batch.return_value = (
+            [_FrameLike(), _FrameLike(), _FrameLike(), _FrameLike()],
+            {"timeout": False, "error_code": None},
+        )
 
         with tempfile.NamedTemporaryFile(suffix=".mp4") as tmp_video:
             result = extract_main_frames(tmp_video.name, num_frames=4, guardar_frames=False)
@@ -127,7 +130,13 @@ class VideoIOSamplingFallbackTests(unittest.TestCase):
             "fps": 24.0,
             "duration": 5.0,
         }
-        mock_extract_batch.return_value = [_FrameLike(), _FrameLike()]
+
+        def _batch_return(_video_path, timestamps, **kwargs):
+            if kwargs.get("return_diagnostics"):
+                return ([_FrameLike() for _ in timestamps], {"timeout": False, "error_code": None})
+            return [_FrameLike() for _ in timestamps]
+
+        mock_extract_batch.side_effect = _batch_return
 
         with tempfile.NamedTemporaryFile(suffix=".mp4") as tmp_video:
             with open_video_capture(tmp_video.name) as cap_session:

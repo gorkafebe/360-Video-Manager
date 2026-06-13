@@ -23,6 +23,7 @@ sys.modules.setdefault("cv2", fake_cv2)
 sys.modules.setdefault("numpy", fake_numpy)
 
 from detector.pipeline import _resolve_motion_feature_flags, run_detection_with_retries
+from detector.video_io import FrameExtractorError
 from workflows.unified_pipeline import JobOptions, _stage_detect_projection, process_video_job
 from core.models import UploadResult
 
@@ -399,6 +400,44 @@ class UnifiedPipelineNormalizationModeTests(unittest.TestCase):
         self.assertTrue(result.success)
         mock_normalize.assert_called_once_with(tmp_video.name)
         self.assertEqual(result.normalized_video_path, "/tmp/compat.mp4")
+
+    @patch("workflows.unified_pipeline._stage_preview_frames", return_value=[])
+    @patch("workflows.unified_pipeline._stage_normalize_codec", return_value="/tmp/compat_retry.mp4")
+    @patch(
+        "workflows.unified_pipeline._stage_detect_projection",
+        side_effect=[
+            FrameExtractorError(
+                "No se pudieron extraer frames del vídeo",
+                code="frame_extraction_timeout",
+                details={"attempts": [{"attempt": 1}]},
+            ),
+            FrameExtractorError(
+                "No se pudieron extraer frames del vídeo",
+                code="frame_extraction_timeout",
+                details={"attempts": [{"attempt": 1}, {"attempt": 2}]},
+            ),
+        ],
+    )
+    def test_detection_failure_after_normalization_retry_reports_enriched_error(
+        self,
+        mock_detect,
+        mock_normalize,
+        _mock_preview,
+    ):
+        with tempfile.NamedTemporaryFile(suffix=".mp4") as tmp_video:
+            result = process_video_job(
+                JobOptions(
+                    local_video_path=tmp_video.name,
+                    convert_if_needed=False,
+                    save_manifest=False,
+                )
+            )
+
+        self.assertFalse(result.success)
+        self.assertIn("after codec-normalization retry", result.error)
+        self.assertIn("code=frame_extraction_timeout", result.error)
+        self.assertEqual(mock_detect.call_count, 2)
+        mock_normalize.assert_called_once_with(tmp_video.name)
 
 
 class UnifiedPipelineUploadSelectionTests(unittest.TestCase):

@@ -442,13 +442,48 @@ def process_video_job(options: JobOptions) -> JobResult:
         # Stage 5: Projection detection
         # ------------------------------------------------------------------ #
         debug_dir = cfg.debug_output_dir
-        detection = _time_stage(
-            "detect_projection",
-            _stage_detect_projection,
-            normalized_path,
-            options.num_detection_frames,
-            debug_dir,
-        )
+        from detector.video_io import FrameExtractorError as DetectorFrameExtractorError
+
+        try:
+            detection = _time_stage(
+                "detect_projection",
+                _stage_detect_projection,
+                normalized_path,
+                options.num_detection_frames,
+                debug_dir,
+            )
+        except DetectorFrameExtractorError as exc:
+            extraction_code = getattr(exc, "code", "frame_extraction_error")
+            sampled_extraction_failure = extraction_code in {
+                "frame_extraction_timeout",
+                "frame_extraction_decode_failure",
+            }
+            if not force_full_codec_normalization and sampled_extraction_failure:
+                logger.warning(
+                    "[DETECT] Sampled extraction failed (%s). Applying one controlled codec-normalization retry.",
+                    extraction_code,
+                )
+                normalized_path = _time_stage("normalize_codec_retry", _stage_normalize_codec, video_path)
+                result.normalized_video_path = normalized_path
+                _log_codec_telemetry(normalized_path, "analysis_retry_input")
+                try:
+                    detection = _time_stage(
+                        "detect_projection_retry",
+                        _stage_detect_projection,
+                        normalized_path,
+                        options.num_detection_frames,
+                        debug_dir,
+                    )
+                except DetectorFrameExtractorError as retry_exc:
+                    retry_code = getattr(retry_exc, "code", "frame_extraction_error")
+                    raise WorkflowError(
+                        f"Projection detection failed after codec-normalization retry "
+                        f"(code={retry_code}): {retry_exc}"
+                    ) from retry_exc
+            else:
+                raise WorkflowError(
+                    f"Projection detection failed (code={extraction_code}): {exc}"
+                ) from exc
         result.projection_type = detection.get("projection_type", "unknown")
         result.confidence = float(detection.get("confidence", 0.0))
         raw_stats = detection.get("stats", {})

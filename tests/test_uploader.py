@@ -8,8 +8,6 @@ from unittest.mock import MagicMock, mock_open, patch
 
 from core.uploader import (
     _build_endpoint,
-    create_category,
-    get_categories,
     get_playlists,
     upload_video_asset,
 )
@@ -58,78 +56,6 @@ class BuildEndpointTests(unittest.TestCase):
         self.assertTrue(result.endswith("/playlists"))
         self.assertFalse(result.endswith("/playlists/"))
 
-    def test_get_categories_endpoint(self):
-        """get_categories uses /categories (no trailing slash) for GET."""
-        result = _build_endpoint("https://cms.example.com/api/v1/media", "/categories")
-        self.assertTrue(result.endswith("/categories"))
-        self.assertFalse(result.endswith("/categories/"))
-
-    def test_create_category_endpoint(self):
-        """create_category uses /categories/ (trailing slash) for POST."""
-        result = _build_endpoint("https://cms.example.com/api/v1/media", "/categories/")
-        self.assertTrue(result.endswith("/categories/"))
-
-
-class CategoriesApiTests(unittest.TestCase):
-    @patch("requests.get")
-    def test_get_categories_returns_results_list(self, mock_get):
-        mock_resp = MagicMock(status_code=200)
-        mock_resp.json.return_value = {"results": [{"id": "c1", "title": "Patient A"}]}
-        mock_get.return_value = mock_resp
-
-        categories = get_categories(api_url="https://cms.example.com/api/v1/media")
-        self.assertEqual(categories, [{"id": "c1", "title": "Patient A"}])
-        mock_get.assert_called_once_with(
-            "https://cms.example.com/api/v1/categories",
-            auth=mock_get.call_args.kwargs["auth"],
-            timeout=mock_get.call_args.kwargs["timeout"],
-        )
-
-    @patch("requests.get")
-    def test_get_categories_handles_invalid_json_response(self, mock_get):
-        mock_resp = MagicMock(status_code=200, text="<html>not-json</html>")
-        mock_resp.json.side_effect = ValueError("bad json")
-        mock_get.return_value = mock_resp
-
-        with self.assertLogs("core.uploader", level="ERROR") as logs:
-            categories = get_categories(api_url="https://cms.example.com/api/v1/media")
-
-        self.assertEqual(categories, [])
-        mock_get.assert_called_once_with(
-            "https://cms.example.com/api/v1/categories",
-            auth=mock_get.call_args.kwargs["auth"],
-            timeout=mock_get.call_args.kwargs["timeout"],
-        )
-        self.assertTrue(any("invalid JSON from https://cms.example.com/api/v1/categories" in m for m in logs.output))
-
-    @patch("requests.post")
-    def test_create_category_fallbacks_to_singular_endpoint_on_404(self, mock_post):
-        api_url = "https://cms.example.com/api/v1/media"
-        first = MagicMock(status_code=404, text="not found")
-        second = MagicMock(status_code=201, text='{"id":"cat-9"}')
-        second.json.return_value = {"id": "cat-9"}
-        mock_post.side_effect = [first, second]
-
-        category_id = create_category("Patient 9", api_url=api_url)
-
-        self.assertEqual(category_id, "cat-9")
-        self.assertEqual(mock_post.call_count, 2)
-        self.assertEqual(mock_post.call_args_list[0].args[0], _build_endpoint(api_url, "/categories/"))
-        self.assertEqual(mock_post.call_args_list[1].args[0], _build_endpoint(api_url, "/category/"))
-
-    @patch("requests.post")
-    def test_create_category_logs_status_and_body_preview(self, mock_post):
-        mock_resp = MagicMock(status_code=403, text="forbidden body")
-        mock_post.return_value = mock_resp
-
-        with self.assertLogs("core.uploader", level="WARNING") as logs:
-            category_id = create_category("Patient 10", api_url="https://cms.example.com/api/v1/media")
-
-        self.assertIsNone(category_id)
-        self.assertTrue(any("create_category: status 403" in m for m in logs.output))
-        self.assertTrue(any("forbidden body" in m for m in logs.output))
-
-
 class PlaylistsApiTests(unittest.TestCase):
     @patch("requests.get")
     def test_get_playlists_handles_invalid_json_response(self, mock_get):
@@ -161,7 +87,7 @@ class UploadMetadataTests(unittest.TestCase):
     @patch("config.settings.get_settings")
     @patch("requests.post")
     @patch("os.path.exists", return_value=True)
-    def test_upload_without_category_omits_category_field(
+    def test_upload_with_tags_includes_tags_field(
         self,
         _mock_exists,
         mock_post,
@@ -187,13 +113,12 @@ class UploadMetadataTests(unittest.TestCase):
         self.assertTrue(result.success)
         call_kwargs = mock_post.call_args.kwargs
         self.assertIn("data", call_kwargs)
-        self.assertNotIn("category", call_kwargs["data"])
         self.assertEqual(call_kwargs["data"]["tags"], "anxiety")
 
     @patch("config.settings.get_settings")
     @patch("requests.post")
     @patch("os.path.exists", return_value=True)
-    def test_upload_includes_category_and_tags(
+    def test_upload_includes_tags(
         self,
         _mock_exists,
         mock_post,
@@ -213,14 +138,12 @@ class UploadMetadataTests(unittest.TestCase):
                 title="Session Upload",
                 description="desc",
                 api_url="https://cms.example.com/api/v1/media",
-                category_id="cat-1",
                 tags=["anxiety", " breathing ", ""],
             )
 
         self.assertTrue(result.success)
         call_kwargs = mock_post.call_args.kwargs
         self.assertIn("data", call_kwargs)
-        self.assertEqual(call_kwargs["data"]["category"], "cat-1")
         self.assertEqual(call_kwargs["data"]["tags"], "anxiety,breathing")
 
     @patch("config.settings.get_settings")

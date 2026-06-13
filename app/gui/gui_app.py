@@ -47,7 +47,6 @@ _THUMB_DETAIL = (320, 180)
 _PAGE_SIZE    = 5
 _ACCENT       = "#1a7fd4"
 _NO_PLAYLIST  = "— sin lista de reproducción —"
-_NO_CATEGORY  = "— sin categoría —"
 
 
 # ── App state ─────────────────────────────────────────────────────────────────
@@ -149,7 +148,6 @@ class VR360ManagerApp:
         self._res_children:      List                  = []   # all widgets in results_frame
         self._card_title_labels: List[ctk.CTkLabel]   = []   # for adaptive wraplength
         self._playlists:         List[Dict]            = []
-        self._categories:        List[Dict]            = []
         self._log_visible:  bool                  = False
         self._status_var  = tkinter.StringVar(value="Listo")
         self._download_progress_lock = threading.Lock()
@@ -162,7 +160,6 @@ class VR360ManagerApp:
 
         # Pre-load playlists from CMS
         threading.Thread(target=self._bg_load_playlists, daemon=True).start()
-        threading.Thread(target=self._bg_load_categories, daemon=True).start()
 
     # ── UI construction ───────────────────────────────────────────────────────
 
@@ -304,28 +301,12 @@ class VR360ManagerApp:
             command=self._on_new_playlist,
         ).grid(row=1, column=2, padx=(0, 12), pady=(4, 10))
 
-        ctk.CTkLabel(upload_opts, text="Paciente (Categoría opcional):").grid(
-            row=2, column=0, padx=(12, 6), pady=(4, 10), sticky="w")
-        self._category_var = tkinter.StringVar(value=_NO_CATEGORY)
-        self._category_menu = ctk.CTkOptionMenu(
-            upload_opts,
-            variable=self._category_var,
-            values=[_NO_CATEGORY],
-            width=300,
-            dynamic_resizing=False,
-        )
-        self._category_menu.grid(row=2, column=1, padx=(0, 6), pady=(4, 10), sticky="w")
-        ctk.CTkButton(
-            upload_opts, text="＋ Nuevo…", width=72,
-            command=self._on_new_category,
-        ).grid(row=2, column=2, padx=(0, 12), pady=(4, 10))
-
         ctk.CTkLabel(upload_opts, text="Etiquetas:").grid(
-            row=3, column=0, padx=(12, 6), pady=(0, 10), sticky="w")
+            row=2, column=0, padx=(12, 6), pady=(0, 10), sticky="w")
         self._tags_entry = ctk.CTkEntry(
             upload_opts, placeholder_text="etiqueta1, etiqueta2, etiqueta3", height=32)
         self._tags_entry.grid(
-            row=3, column=1, columnspan=2, padx=(0, 12), pady=(0, 10), sticky="ew")
+            row=2, column=1, columnspan=2, padx=(0, 12), pady=(0, 10), sticky="ew")
 
         # ── Action buttons (in always-visible bottom frame) ──
         actions = ctk.CTkFrame(bottom, fg_color="transparent")
@@ -737,60 +718,6 @@ class VR360ManagerApp:
             logger.warning("Could not create playlist: %s", exc)
         self._bg_load_playlists(auto_select=name)
 
-    def _bg_load_categories(self, auto_select: Optional[str] = None) -> None:
-        from core.uploader import get_categories
-        try:
-            categories = get_categories()
-        except Exception as exc:
-            logger.debug("Category load failed: %s", exc)
-            categories = []
-        self.master.after(0, lambda c=categories, selected=auto_select: self._set_categories(c, selected))
-
-    def _set_categories(self, categories: List[Dict], auto_select: Optional[str] = None) -> None:
-        self._categories = categories
-        values = [_NO_CATEGORY] + [
-            str(c.get("title") or c.get("id") or f"Categoría {i + 1}")
-            for i, c in enumerate(categories)
-        ]
-        self._category_menu.configure(values=values)
-        current = self._category_var.get()
-        chosen = next(
-            (value for value in values if value == auto_select),
-            current if current in values else _NO_CATEGORY,
-        )
-        self._category_var.set(chosen)
-
-    def _get_category_id(self) -> Optional[str]:
-        chosen = self._category_var.get()
-        if chosen == _NO_CATEGORY:
-            return None
-        for c in self._categories:
-            label = str(c.get("title") or c.get("id") or "")
-            if label == chosen:
-                return str(c.get("id") or "")
-        return None
-
-    def _on_new_category(self) -> None:
-        dialog = ctk.CTkInputDialog(
-            text="Introduce el nombre del paciente/categoría:",
-            title="Nueva categoría",
-        )
-        name = dialog.get_input()
-        if name and name.strip():
-            threading.Thread(
-                target=self._bg_create_category, args=(name.strip(),), daemon=True,
-            ).start()
-
-    def _bg_create_category(self, name: str) -> None:
-        from core.uploader import create_category
-        try:
-            new_id = create_category(name)
-            if new_id:
-                logger.info("Created category %r (id=%s)", name, new_id)
-        except Exception as exc:
-            logger.warning("Could not create category: %s", exc)
-        self._bg_load_categories(auto_select=name)
-
     # ── Download & Process ────────────────────────────────────────────────────
 
     def _on_download_process(self) -> None:
@@ -892,13 +819,12 @@ class VR360ManagerApp:
             tkinter.messagebox.showwarning("Advertencia", "Introduce un título para la subida.")
             return
         playlist_id = self._get_playlist_id()
-        category_id = self._get_category_id()
         tags = self._parse_tags(self._tags_entry.get().strip())
         self._set_state(AppState.UPLOADING)
         self._progress_start_indeterminate("Subiendo…")
         threading.Thread(
             target=self._bg_upload,
-            args=(self._ready_path, title, playlist_id, category_id, tags),
+            args=(self._ready_path, title, playlist_id, tags),
             daemon=True,
         ).start()
 
@@ -907,7 +833,6 @@ class VR360ManagerApp:
         path: str,
         title: str,
         playlist_id: Optional[str],
-        category_id: Optional[str],
         tags: List[str],
     ) -> None:
         from core.uploader import upload_video_asset
@@ -917,7 +842,6 @@ class VR360ManagerApp:
                 title=title,
                 description="",
                 playlist_id=playlist_id,
-                category_id=category_id,
                 tags=tags,
             )
         except (MediaCMSError, Exception) as exc:

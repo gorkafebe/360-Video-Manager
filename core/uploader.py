@@ -165,80 +165,6 @@ def create_playlist(title: str, api_url: Optional[str] = None) -> Optional[str]:
         return None
 
 
-def get_categories(api_url: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Return the list of existing MediaCMS categories."""
-    import requests  # type: ignore
-    url = _get_api_url(api_url)
-    endpoint = _build_endpoint(url, "/categories")
-    auth = _get_auth()
-    try:
-        resp = requests.get(endpoint, auth=auth, timeout=_REQUEST_TIMEOUT)
-        if resp.status_code == 200:
-            data = _safe_json_response(resp, endpoint, "get_categories")
-            if data is None:
-                return []
-            return data.get("results", data) if isinstance(data, dict) else data
-        logger.warning(
-            "get_categories: unexpected status %s from %s body=%r",
-            resp.status_code,
-            endpoint,
-            (resp.text or "")[:_RESPONSE_PREVIEW_MAX_LENGTH],
-        )
-        return []
-    except requests.Timeout:
-        logger.error("Timeout fetching categories.")
-        return []
-    except Exception as exc:
-        logger.error("Error fetching categories: %s", exc)
-        return []
-
-
-def create_category(title: str, api_url: Optional[str] = None) -> Optional[str]:
-    """Create a new category and return its ID, or None on failure."""
-    import requests  # type: ignore
-    url = _get_api_url(api_url)
-    auth = _get_auth()
-    payload = {"title": title}
-    endpoint_paths = ("/categories/", "/category/")
-    try:
-        for attempt, path in enumerate(endpoint_paths):
-            is_last_attempt = attempt == len(endpoint_paths) - 1
-            endpoint = _build_endpoint(url, path)
-            resp = requests.post(
-                endpoint,
-                json=payload,
-                auth=auth,
-                timeout=_REQUEST_TIMEOUT,
-            )
-            if resp.status_code in (200, 201):
-                data = _safe_json_response(resp, endpoint, "create_category")
-                if isinstance(data, dict):
-                    return data.get("id")
-                logger.warning(
-                    "create_category: successful status %s but response JSON was missing or malformed from %s",
-                    resp.status_code,
-                    endpoint,
-                )
-                return None
-
-            preview = (resp.text or "")[:_RESPONSE_PREVIEW_MAX_LENGTH]
-            logger.warning(
-                "create_category: status %s from %s body=%r",
-                resp.status_code,
-                endpoint,
-                preview,
-            )
-            if resp.status_code != 404 or is_last_attempt:
-                break
-        return None
-    except requests.Timeout:
-        logger.error("Timeout creating category.")
-        return None
-    except Exception as exc:
-        logger.error("Error creating category: %s", exc)
-        return None
-
-
 def add_to_playlist(
     video_token: str,
     playlist_id: str,
@@ -270,7 +196,6 @@ def upload_video_asset(
     api_url: Optional[str] = None,
     playlist_id: Optional[str] = None,
     new_playlist_name: Optional[str] = None,
-    category_id: Optional[str] = None,
     tags: Optional[List[str]] = None,
 ) -> UploadResult:
     """Upload *video_path* to MediaCMS and optionally add it to a playlist.
@@ -283,7 +208,6 @@ def upload_video_asset(
         playlist_id: Existing playlist identifier to add the video to.
         new_playlist_name: When set, create a new playlist with this name and
             add the video to it.
-        category_id: Optional MediaCMS category ID for metadata assignment.
         tags: Optional personalized tags to assign to the uploaded media.
 
     Returns:
@@ -308,8 +232,6 @@ def upload_video_asset(
         **({"X-CSRFToken": token} if token else {}),
     }
     data = {"title": title, "description": description}
-    if category_id:
-        data["category"] = str(category_id)
     clean_tags = _normalise_tags(tags)
     if clean_tags:
         data["tags"] = ",".join(clean_tags)

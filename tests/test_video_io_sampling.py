@@ -168,6 +168,14 @@ class VideoIOSamplingFallbackTests(unittest.TestCase):
         self.assertEqual(diag["error_code"], "ffmpeg_batch_timeout")
 
     @patch("detector.video_io.subprocess.run")
+    def test_batch_ffmpeg_timeout_without_diagnostics_returns_nones(self, mock_run):
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd=["ffmpeg"], timeout=120)
+
+        frames = _extract_batch_frames_ffmpeg("/tmp/video.mp4", [1.0, 2.0])
+
+        self.assertEqual(frames, [None, None])
+
+    @patch("detector.video_io.subprocess.run")
     def test_batch_ffmpeg_empty_output_reports_diagnostics(self, mock_run):
         mock_run.return_value = MagicMock(returncode=0, stdout=b"", stderr=b"")
 

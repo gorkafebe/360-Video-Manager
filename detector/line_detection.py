@@ -1,3 +1,4 @@
+import logging
 from collections import defaultdict
 from typing import Any, Dict, Optional
 
@@ -5,6 +6,8 @@ import cv2
 import numpy as np
 
 from .preprocessing import prepare_frame_for_line_detection
+
+logger = logging.getLogger(__name__)
 
 
 MIN_SEARCH_BAND_HALF = 2
@@ -100,8 +103,17 @@ def detect_horizontal_line(
     min_coverage_ratio: float = 0.20,
     min_quality_score: float = 0.62,
     fallback_min_quality_score: float = 0.78,
+    fft_min_dominance: float = 0.10,
+    strong_coverage_ratio: float = 0.40,
+    morph_length_ratio: float = 0.02,
 ) -> Dict[str, Any]:
-    """Detecta línea horizontal centrada sin efectos secundarios."""
+    """Detect a centred horizontal seam line in *frame*.
+
+    Applies Hough → LSD → fitLine candidate detection on a narrow centre strip,
+    followed by a quality gate that requires FFT spectral confirmation on all paths.
+    All numeric thresholds are configurable via function parameters (backed by env vars
+    in config/settings.py using the VPD_LINE_* prefix).
+    """
     try:
         height, width = frame.shape[:2]
         gray = prepare_frame_for_line_detection(frame)
@@ -113,7 +125,7 @@ def detect_horizontal_line(
         hough_max_gap = max(10, int(width * 0.02))
         min_line_length_required = float(hough_min_length)
         min_coverage_px = float(width) * min_coverage_ratio  # minimum merged span
-        strong_coverage_px = float(width) * 0.40  # span that overrides FFT requirement
+        strong_coverage_px = float(width) * strong_coverage_ratio
         band_half = max(MIN_SEARCH_BAND_HALF, int(round(height * float(search_band_ratio) * 0.5)))
         y_top = max(0, int(center_y) - band_half)
         y_bottom = min(height, int(center_y) + band_half)
@@ -154,7 +166,7 @@ def detect_horizontal_line(
         canny_high = float(max(50.0, otsu_thresh))
         canny_low = canny_high * 0.4
         dst = cv2.Canny(roi, canny_low, canny_high, apertureSize=3)
-        morph_len = max(15, int(width * 0.02))
+        morph_len = max(15, int(width * morph_length_ratio))
         morph_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (morph_len, 1))
         dst = cv2.morphologyEx(dst, cv2.MORPH_CLOSE, morph_kernel)
 
@@ -422,7 +434,7 @@ def detect_horizontal_line(
             dy_best = abs(int(best_candidate["y2"]) - int(best_candidate["y1"]))
             angle_deg = float(np.degrees(np.arctan2(dy_best, dx_best)))
 
-            fft_check = _verify_line_with_fft(roi)
+            fft_check = _verify_line_with_fft(roi, min_dominance=fft_min_dominance)
             fft_confirmed = bool(fft_check["confirmed"])
 
             continuity_ratio = float(best_candidate.get("continuity_ratio", 1.0))
@@ -438,9 +450,9 @@ def detect_horizontal_line(
                 continuity_ratio=continuity_ratio,
             )
 
-            # Quality gate: require FFT confirmation OR high non-fallback Hough coverage.
-            # Fallback candidates (LSD / fitLine) always require FFT to be confirmed because
-            # they can be constructed from noisy edge clusters without real segment evidence.
+            # Quality gate: FFT spectral confirmation is required on ALL paths.
+            # Fallback candidates (LSD / fitLine) also need FFT but apply a stricter quality floor.
+            # high_coverage relaxes slope_tight for non-fallback Hough lines only.
             from_fallback = bool(
                 best_candidate.get("from_lsd", False) or best_candidate.get("from_fitline", False)
             )
@@ -466,9 +478,21 @@ def detect_horizontal_line(
                 )
             else:
                 detection_confirmed = bool(
-                    (fft_confirmed and quality_ok and strict_centered and continuity_ok)
-                    or (high_coverage and quality_ok and strict_centered and slope_tight and continuity_ok)
+                    fft_confirmed
+                    and quality_ok
+                    and strict_centered
+                    and continuity_ok
+                    and (slope_tight or high_coverage)
                 )
+            logger.debug(
+                "[LINE_H] fft_confirmed=%s dominance=%.3f quality=%.3f "
+                "strict_centered=%s slope_tight=%s high_coverage=%s continuity_ok=%s -> %s",
+                fft_confirmed,
+                fft_check.get("dominance", float("nan")),
+                quality["quality_score"],
+                strict_centered, slope_tight, high_coverage, continuity_ok,
+                "CONFIRMED" if detection_confirmed else "REJECTED",
+            )
 
             debug_line_info["quality_gate"] = {
                 "fft_confirmed": fft_confirmed,
@@ -591,12 +615,17 @@ def detect_vertical_line(
     min_coverage_ratio: float = 0.20,
     min_quality_score: float = 0.62,
     fallback_min_quality_score: float = 0.78,
+    fft_min_dominance: float = 0.10,
+    strong_coverage_ratio: float = 0.40,
+    morph_length_ratio: float = 0.02,
 ) -> Dict[str, Any]:
-    """Detecta línea vertical centrada (seam izquierda-derecha) sin efectos secundarios.
+    """Detect a centred vertical seam line in *frame*.
 
     Mirrors detect_horizontal_line exactly, with width/height axes swapped.
     The search band is a vertical strip centred at x = width/2.
     Coverage is measured along the frame height.
+    All numeric thresholds are configurable via function parameters (backed by env vars
+    in config/settings.py using the VPD_LINE_* prefix).
     """
     try:
         height, width = frame.shape[:2]
@@ -609,7 +638,7 @@ def detect_vertical_line(
         hough_max_gap = max(10, int(height * 0.02))
         min_line_length_required = float(hough_min_length)
         min_coverage_px = float(height) * min_coverage_ratio
-        strong_coverage_px = float(height) * 0.40
+        strong_coverage_px = float(height) * strong_coverage_ratio
         band_half = max(MIN_SEARCH_BAND_HALF, int(round(width * float(search_band_ratio) * 0.5)))
         x_left = max(0, int(center_x) - band_half)
         x_right = min(width, int(center_x) + band_half)
@@ -650,7 +679,7 @@ def detect_vertical_line(
         canny_high = float(max(50.0, otsu_thresh))
         canny_low = canny_high * 0.4
         dst = cv2.Canny(roi, canny_low, canny_high, apertureSize=3)
-        morph_len = max(15, int(height * 0.02))
+        morph_len = max(15, int(height * morph_length_ratio))
         # Vertical morphology kernel (1 × morph_len) to connect vertical edge fragments
         morph_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, morph_len))
         dst = cv2.morphologyEx(dst, cv2.MORPH_CLOSE, morph_kernel)
@@ -895,7 +924,7 @@ def detect_vertical_line(
             dy_best = abs(int(best_candidate["y2"]) - int(best_candidate["y1"]))
             angle_deg = float(np.degrees(np.arctan2(dx_best, dy_best)))  # angle from vertical
 
-            fft_check = _verify_vertical_line_with_fft(roi)
+            fft_check = _verify_vertical_line_with_fft(roi, min_dominance=fft_min_dominance)
             fft_confirmed = bool(fft_check["confirmed"])
 
             continuity_ratio = float(best_candidate.get("continuity_ratio", 1.0))
@@ -936,9 +965,21 @@ def detect_vertical_line(
                 )
             else:
                 detection_confirmed = bool(
-                    (fft_confirmed and quality_ok and strict_centered and continuity_ok)
-                    or (high_coverage and quality_ok and strict_centered and slope_tight and continuity_ok)
+                    fft_confirmed
+                    and quality_ok
+                    and strict_centered
+                    and continuity_ok
+                    and (slope_tight or high_coverage)
                 )
+            logger.debug(
+                "[LINE_V] fft_confirmed=%s dominance=%.3f quality=%.3f "
+                "strict_centered=%s slope_tight=%s high_coverage=%s continuity_ok=%s -> %s",
+                fft_confirmed,
+                fft_check.get("dominance", float("nan")),
+                quality["quality_score"],
+                strict_centered, slope_tight, high_coverage, continuity_ok,
+                "CONFIRMED" if detection_confirmed else "REJECTED",
+            )
 
             debug_line_info["quality_gate"] = {
                 "fft_confirmed": fft_confirmed,

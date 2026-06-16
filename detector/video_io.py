@@ -1,3 +1,5 @@
+import concurrent.futures
+import logging
 import os
 import json
 import subprocess
@@ -8,6 +10,10 @@ import cv2
 import numpy as np
 
 from .projection_conversion import detect_ffmpeg_h264_encoder, _is_hardware_encoder_runtime_failure
+
+logger = logging.getLogger(__name__)
+
+_AV1_CODEC_NAMES = frozenset({"av1", "libaom-av1", "libdav1d"})
 
 
 class FrameExtractorError(Exception):
@@ -268,6 +274,26 @@ def _extract_batch_frames_ffmpeg(
             }
         return empty_result
 
+    if len(timestamps_seconds) > MAX_SINGLE_PASS_FRAMES:
+        try:
+            parallel_frames = _extract_batch_frames_ffmpeg_parallel(video_path, timestamps_seconds, timeout=timeout)
+            if return_diagnostics:
+                parallel_diag: Dict[str, Any] = {
+                    "mode": "parallel",
+                    "requested_timestamps": [round(float(t), 6) for t in timestamps_seconds],
+                    "timeout_seconds": timeout,
+                    "timeout": False,
+                    "returncode": 0,
+                    "stderr": "",
+                    "raw_images_found": len(timestamps_seconds),
+                    "frames_decoded": sum(1 for f in parallel_frames if f is not None),
+                    "error_code": None,
+                }
+                return parallel_frames, parallel_diag
+            return parallel_frames
+        except Exception:
+            logger.warning("Parallel ffmpeg extraction failed; retrying with single-pass select= filter.")
+
     select_expr = "+".join(
         f"lt(prev_pts*TB,{t:.6f})*gte(pts*TB,{t:.6f})" for t in timestamps_seconds
     )
@@ -334,6 +360,51 @@ def _extract_batch_frames_ffmpeg(
     if diag["frames_decoded"] == 0:
         diag["error_code"] = "ffmpeg_batch_decoded_empty"
     return (results, diag) if return_diagnostics else results
+
+
+MAX_SINGLE_PASS_FRAMES = 10
+
+
+def _extract_single_frame_to_temp(video_path: str, ts: float, tmp_path: str, per_frame_timeout: int) -> bool:
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error",
+        "-ss", f"{ts:.6f}", "-i", video_path,
+        "-frames:v", "1", "-q:v", "2", "-y", tmp_path,
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, timeout=per_frame_timeout)
+        return proc.returncode == 0 and os.path.exists(tmp_path)
+    except Exception:
+        return False
+
+
+def _extract_batch_frames_ffmpeg_parallel(
+    video_path: str,
+    timestamps_seconds: List[float],
+    timeout: int = 120,
+    max_workers: int = 4,
+) -> List[Optional[np.ndarray]]:
+    """Extract frames in parallel, one ffmpeg process per timestamp using fast-seek."""
+    results: List[Optional[np.ndarray]] = [None] * len(timestamps_seconds)
+    per_frame_timeout = max(15, timeout // len(timestamps_seconds))
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_paths = [os.path.join(tmpdir, f"frame_{i:04d}.jpg") for i in range(len(timestamps_seconds))]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(
+                    _extract_single_frame_to_temp, video_path, ts, tmp_paths[i], per_frame_timeout
+                ): i
+                for i, ts in enumerate(timestamps_seconds)
+            }
+            for fut in concurrent.futures.as_completed(futures):
+                idx = futures[fut]
+                try:
+                    if fut.result():
+                        frame = cv2.imread(tmp_paths[idx])
+                        results[idx] = frame if (frame is not None and frame.size > 0) else None
+                except Exception:
+                    pass
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -404,20 +475,20 @@ def convert_video_codec(video_path: str) -> str:
     ) as tmp:
         compat_path = tmp.name
 
+    _meta = probe_video_stream(video_path)
+    _codec = _meta.get("codec_name", "").lower()
+    _is_av1_input = _codec in _AV1_CODEC_NAMES
+    if _is_av1_input:
+        logger.warning(
+            "AV1 codec detected — hardware decode not supported by OpenCV on this platform; "
+            "re-encoding to H.264 for analysis (temp file, not stored)."
+        )
+
     encoder = detect_ffmpeg_h264_encoder()
-    cmd = [
-        "ffmpeg",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-y",
-        "-hwaccel",
-        "auto",
-        "-i",
-        video_path,
-        "-c:v",
-        encoder,
-    ]
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
+    if not _is_av1_input:
+        cmd.extend(["-hwaccel", "auto"])
+    cmd.extend(["-i", video_path, "-c:v", encoder])
     if encoder == "libx264":
         cmd.extend(["-preset", "veryfast", "-crf", "23"])
     cmd.extend(
@@ -491,13 +562,20 @@ def extract_main_frames(
         raise FrameExtractorError(f"Modo de extracción inválido: {modo_extraccion}")
 
     _owns_cap = cap_session is None
+    if _owns_cap:
+        cap_session = _CachedCapture(video_path)
     try:
         video_path_procesado = video_path
-        if cap_session is None:
-            cap_session = _CachedCapture(video_path)
 
         can_decode_opencv = cap_session.can_decode
         metadata = probe_video_stream(video_path)
+        if not can_decode_opencv:
+            _input_codec = metadata.get("codec_name", "").lower()
+            if _input_codec in _AV1_CODEC_NAMES:
+                logger.warning(
+                    "AV1 video — OpenCV cannot decode AV1 on this platform; "
+                    "using ffmpeg subprocess for frame extraction."
+                )
         total_frames = cap_session.total_frames if can_decode_opencv else int(metadata.get("total_frames", 0))
         fps = cap_session.fps if can_decode_opencv else float(metadata.get("fps", 0.0))
         if total_frames <= 0:
@@ -506,8 +584,6 @@ def extract_main_frames(
             fps = float(metadata.get("fps", 0.0))
         duration = (total_frames / fps) if (fps > 0 and total_frames > 0) else float(metadata.get("duration", 0.0))
         if total_frames <= 0:
-            if _owns_cap:
-                cap_session.release()
             raise FrameExtractorError("No se pudo determinar el total de frames del vídeo")
         video_name = os.path.splitext(os.path.basename(video_path))[0]
 
@@ -630,8 +706,6 @@ def extract_main_frames(
                 frame_positions = active_positions
                 break
 
-        if _owns_cap:
-            cap_session.release()
         if not frames:
             error_code = "frame_extraction_timeout" if has_timeout else "frame_extraction_decode_failure"
             raise FrameExtractorError(
@@ -701,6 +775,9 @@ def extract_main_frames(
             code="frame_extraction_unexpected",
             details={"video_path": video_path},
         ) from exc
+    finally:
+        if _owns_cap:
+            cap_session.release()
 
 
 def extract_secondary_frames(

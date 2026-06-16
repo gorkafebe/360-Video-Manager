@@ -1,5 +1,6 @@
 import logging
 import os
+import threading
 import time
 from typing import Any, Dict, List, Optional, Set
 
@@ -56,6 +57,7 @@ def load_config():
 
 CONFIG = load_config()
 _MOTION_CAPABILITY_SNAPSHOT_EMITTED = False
+_MOTION_CAPABILITY_SNAPSHOT_LOCK = threading.Lock()
 _DEFAULT_MOTION_FEATURE_TIERS: Dict[str, Any] = {
     "tier_a_features": [
         "canny_morphology_houghlinesp",
@@ -92,12 +94,13 @@ def _resolve_motion_feature_flags(config: Optional[Dict[str, Any]] = None) -> Di
         for a in feature_tiers.get("tier_c_flow_algorithms", ["deepflow", "pcaflow", "sparse_to_dense"])
     ]
 
-    if not _MOTION_CAPABILITY_SNAPSHOT_EMITTED:
-        logger.info(
-            "[MOTION] OpenCV capability snapshot: %s",
-            ", ".join(f"{k}={int(bool(v))}" for k, v in sorted(capabilities.items())),
-        )
-        _MOTION_CAPABILITY_SNAPSHOT_EMITTED = True
+    with _MOTION_CAPABILITY_SNAPSHOT_LOCK:
+        if not _MOTION_CAPABILITY_SNAPSHOT_EMITTED:
+            _MOTION_CAPABILITY_SNAPSHOT_EMITTED = True
+            logger.info(
+                "[MOTION] OpenCV capability snapshot: %s",
+                ", ".join(f"{k}={int(bool(v))}" for k, v in sorted(capabilities.items())),
+            )
 
     enable_refinement = bool(cfg.get("flow_enable_refinement", False))
     enable_fb_check = bool(cfg.get("flow_enable_fb_check", False))
@@ -215,6 +218,7 @@ def _analyze_motion_pair_detailed(
     forward_backward_threshold: float = 1.5,
     enable_geometry_evidence: bool = False,
     geometry_evidence_weight: float = 0.20,
+    store_flow: bool = False,
 ) -> Dict[str, Any]:
     try:
         flow = compute_optical_flow(
@@ -333,7 +337,7 @@ def _analyze_motion_pair_detailed(
             "pair_geometry_reprojection_error": float(geometry_evidence.get("reprojection_error", 999.0)),
             "status": status,
             "reason": reason,
-            "flow": flow,
+            "flow": flow if store_flow else None,
             "region_bounds": region_bounds,
             "region_info": region_info,
         }
@@ -487,6 +491,7 @@ def _classify_non_equirectangular(
                     forward_backward_threshold=forward_backward_threshold,
                     enable_geometry_evidence=enable_geometry_evidence,
                     geometry_evidence_weight=geometry_evidence_weight,
+                    store_flow=bool(motion_visualizations_dir),
                 )
                 short_pair_cache[(i, j)] = quick_pair
                 if quick_pair.get("decision") is None:
@@ -537,6 +542,7 @@ def _classify_non_equirectangular(
                     forward_backward_threshold=forward_backward_threshold,
                     enable_geometry_evidence=enable_geometry_evidence,
                     geometry_evidence_weight=geometry_evidence_weight,
+                    store_flow=bool(motion_visualizations_dir),
                 )
 
             total_regiones_validas += int(pair_result.get("valid_regions", 0))
@@ -550,7 +556,7 @@ def _classify_non_equirectangular(
                 else:
                     status_name = f"motion_{pair_label}_used_{'eac' if pair_result.get('decision') else 'cubic'}.jpg"
                 vis_path = os.path.join(motion_visualizations_dir, status_name)
-                vis = secuencia[i + 1].copy()
+                vis = secuencia[j].copy()
                 flow = pair_result.get("flow")
                 region_bounds = pair_result.get("region_bounds", [])
                 region_info = pair_result.get("region_info", {})
@@ -605,6 +611,7 @@ def _classify_non_equirectangular(
                 cv2.putText(vis, f"CUBIC score={cubic_score_str}", (8, 56), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 2)
                 cv2.putText(vis, f"Pattern: {winner}", (8, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2)
                 save_frame_debug(vis_path, vis, "MOTION")
+                pair_result["flow"] = None
                 logger.info(f"[PAIR][{pair_label}] output_file={vis_path}")
 
             if pair_result.get("decision") is None:
@@ -1062,6 +1069,9 @@ def run_detection_pipeline(
                 min_coverage_ratio=CONFIG["line_min_coverage_ratio"],
                 min_quality_score=CONFIG["line_min_quality_score"],
                 fallback_min_quality_score=CONFIG["line_fallback_min_quality_score"],
+                fft_min_dominance=CONFIG["line_fft_min_dominance"],
+                strong_coverage_ratio=CONFIG["line_strong_coverage_ratio"],
+                morph_length_ratio=CONFIG["line_morph_length_ratio"],
             )
             frames_analyzed += 1
 
@@ -1107,6 +1117,9 @@ def run_detection_pipeline(
                     min_coverage_ratio=CONFIG["line_min_coverage_ratio"],
                     min_quality_score=CONFIG["line_min_quality_score"],
                     fallback_min_quality_score=CONFIG["line_fallback_min_quality_score"],
+                    fft_min_dominance=CONFIG["line_fft_min_dominance"],
+                    strong_coverage_ratio=CONFIG["line_strong_coverage_ratio"],
+                    morph_length_ratio=CONFIG["line_morph_length_ratio"],
                 )
                 save_line_visual_debug(
                     frame=frame,

@@ -1,3 +1,4 @@
+import math
 import sys
 import tempfile
 import types
@@ -10,6 +11,19 @@ def _fake_callable(*args, **kwargs):
 
 
 fake_cv2 = types.ModuleType("cv2")
+fake_cv2.THRESH_BINARY = 0
+fake_cv2.THRESH_OTSU = 0
+fake_cv2.MORPH_RECT = 0
+fake_cv2.MORPH_CLOSE = 0
+fake_cv2.LSD_REFINE_STD = 0
+fake_cv2.DIST_L12 = 0
+fake_cv2.COLOR_BGR2GRAY = 0
+fake_cv2.HISTCMP_CORREL = 0
+fake_cv2.HISTCMP_BHATTACHARYYA = 0
+fake_cv2.threshold = lambda *_a, **_k: (80.0, None)
+fake_cv2.Canny = lambda *_a, **_k: None
+fake_cv2.getStructuringElement = lambda *_a, **_k: None
+fake_cv2.morphologyEx = lambda img, *_a, **_k: img
 fake_cv2.__getattr__ = lambda _name: _fake_callable
 
 fake_numpy = types.ModuleType("numpy")
@@ -17,6 +31,10 @@ fake_numpy.ndarray = object
 fake_numpy.mean = lambda values: (sum(values) / len(values)) if values else 0.0
 fake_numpy.median = lambda values: sorted(values)[len(values) // 2] if values else 0.0
 fake_numpy.pi = 3.141592653589793
+fake_numpy.clip = lambda a, a_min, a_max: max(a_min, min(a_max, a))
+fake_numpy.sqrt = lambda x: math.sqrt(float(x))
+fake_numpy.degrees = lambda v: math.degrees(float(v))
+fake_numpy.arctan2 = lambda y, x: math.atan2(float(y), float(x))
 fake_numpy.__getattr__ = lambda _name: _fake_callable
 
 sys.modules.setdefault("cv2", fake_cv2)

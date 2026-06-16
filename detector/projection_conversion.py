@@ -588,8 +588,8 @@ def convert_detected_projection_to_equirectangular(
     - **unknown**: skip, reason ``projection_unknown``
     - **equirectangular**: skip, reason ``already_equirectangular``
     - **stereo_equi**: skip, reason ``already_equirectangular_stereo_layout``
-    - **eac**: convert via ``ffmpeg v360=e:equirect``
-    - **cubic**: convert via ``ffmpeg v360=c6x1:equirect``
+    - **eac**: convert via ``ffmpeg v360=eac:equirect``
+    - **cubic**: convert via ``ffmpeg v360=c3x2:equirect``
 
     The result dict is always safe to return even when ffmpeg is missing or
     the conversion fails — detection results are never affected.

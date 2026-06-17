@@ -200,15 +200,3 @@ def get_video_thumbnail_urls(video_id: str) -> Dict[str, str]:
         "mqdefault": f"{base}/mqdefault.jpg",
         "default": f"{base}/default.jpg",
     }
-
-
-# ---------------------------------------------------------------------------
-# Backward-compatible aliases (used by legacy vr360_manager code still in place)
-# ---------------------------------------------------------------------------
-
-buscar_youtube = search_videos
-extraer_video_id = extract_video_id
-obtener_thumbnail_video = get_video_thumbnail_urls
-
-# Legacy exception re-exports
-YouTubeError = YouTubeAPIError  # type: ignore[misc]

@@ -52,6 +52,12 @@ def _parse_args():
     p.add_argument("--min-coverage-ratio", type=float, default=0.20,
                    metavar="RATIO",
                    help="Minimum seam coverage as fraction of frame dimension (default: 0.20)")
+    p.add_argument("--enable-profile-gate", action="store_true", default=False,
+                   help="Enable spatial profile gate (off by default)")
+    p.add_argument("--profile-min-coverage", type=float, default=0.20, metavar="RATIO",
+                   help="Min fraction of columns with consistent gradient peak (default: 0.20)")
+    p.add_argument("--profile-min-prominence", type=float, default=3.0, metavar="PROM",
+                   help="Min peak/median gradient ratio to confirm seam (default: 3.0)")
     return p.parse_args()
 
 
@@ -114,6 +120,9 @@ def main():
             max_slope=args.max_slope,
             min_coverage_ratio=args.min_coverage_ratio,
             fft_min_dominance=args.fft_min_dominance,
+            enable_profile_gate=args.enable_profile_gate,
+            profile_min_coverage_ratio=args.profile_min_coverage,
+            profile_min_prominence=args.profile_min_prominence,
         )
 
         # Horizontal detection
@@ -130,6 +139,8 @@ def main():
         fft_dom_v = v_result.get("fft_dominance", float("nan"))
         gate = h_result.get("debug_line_info", {}).get("quality_gate") or {}
         quality = gate.get("quality_score", float("nan"))
+        prof_cov = gate.get("profile_coverage_ratio", float("nan"))
+        prof_prom = gate.get("profile_prominence", float("nan"))
 
         rows.append({
             "frame": frame_idx,
@@ -138,6 +149,8 @@ def main():
             "fft_h": f"{fft_dom_h:+.3f}" if fft_dom_h == fft_dom_h else "  n/a",
             "fft_v": f"{fft_dom_v:+.3f}" if fft_dom_v == fft_dom_v else "  n/a",
             "quality": f"{quality:.3f}" if quality == quality else " n/a",
+            "prof_cov": f"{prof_cov:.3f}" if prof_cov == prof_cov else "  n/a",
+            "prof_prom": f"{prof_prom:.2f}" if prof_prom == prof_prom else " n/a",
         })
 
         logger.info("Frame %5d: horiz=%-3s vert=%-3s  fft_h=%+.3f  fft_v=%+.3f  quality=%s",
@@ -155,7 +168,8 @@ def main():
     # Print summary table
     header = (
         f"{'Frame':>7}  {'H-Line':>7}  {'V-Line':>7}  "
-        f"{'FFT-H':>8}  {'FFT-V':>8}  {'Quality':>8}"
+        f"{'FFT-H':>8}  {'FFT-V':>8}  {'Quality':>8}  "
+        f"{'Prof-Cov':>8}  {'Prof-Prom':>9}"
     )
     sep = "=" * len(header)
     print(f"\n{sep}")
@@ -164,7 +178,8 @@ def main():
     for r in rows:
         print(
             f"{r['frame']:>7}  {r['h_line']:>7}  {r['v_line']:>7}  "
-            f"{r['fft_h']:>8}  {r['fft_v']:>8}  {r['quality']:>8}"
+            f"{r['fft_h']:>8}  {r['fft_v']:>8}  {r['quality']:>8}  "
+            f"{r['prof_cov']:>8}  {r['prof_prom']:>9}"
         )
     print(sep)
 

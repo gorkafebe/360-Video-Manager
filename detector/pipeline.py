@@ -1072,6 +1072,9 @@ def run_detection_pipeline(
                 fft_min_dominance=CONFIG["line_fft_min_dominance"],
                 strong_coverage_ratio=CONFIG["line_strong_coverage_ratio"],
                 morph_length_ratio=CONFIG["line_morph_length_ratio"],
+                enable_profile_gate=CONFIG["line_enable_profile_gate"],
+                profile_min_coverage_ratio=CONFIG["line_profile_min_coverage_ratio"],
+                profile_min_prominence=CONFIG["line_profile_min_prominence"],
             )
             frames_analyzed += 1
 
@@ -1120,6 +1123,9 @@ def run_detection_pipeline(
                     fft_min_dominance=CONFIG["line_fft_min_dominance"],
                     strong_coverage_ratio=CONFIG["line_strong_coverage_ratio"],
                     morph_length_ratio=CONFIG["line_morph_length_ratio"],
+                    enable_profile_gate=CONFIG["line_enable_profile_gate"],
+                    profile_min_coverage_ratio=CONFIG["line_profile_min_coverage_ratio"],
+                    profile_min_prominence=CONFIG["line_profile_min_prominence"],
                 )
                 save_line_visual_debug(
                     frame=frame,

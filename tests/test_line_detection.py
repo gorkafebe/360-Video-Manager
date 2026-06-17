@@ -60,6 +60,10 @@ _V_CENTER_ROI_X = 2  # ROI x that maps to frame x=100 (centre)
 _FFT_OK = {"confirmed": True, "confidence": 0.90, "dominance": 0.50}
 _FFT_NO = {"confirmed": False, "confidence": 0.10, "dominance": -0.50}
 
+# Profile verifier stub results
+_PROFILE_OK = {"confirmed": True, "coverage_ratio": 0.90, "peak_prominence": 8.5, "peak_index": 2}
+_PROFILE_FAIL = {"confirmed": False, "coverage_ratio": 0.05, "peak_prominence": 1.5, "peak_index": 1}
+
 
 def _hline(roi_y, x1=0, x2=None):
     """Single HoughLinesP segment. x coords are frame-absolute; roi_y is ROI-relative."""
@@ -157,6 +161,8 @@ class HorizontalDetectionTests(unittest.TestCase):
             "High-coverage Hough line must be rejected when FFT=False (Fix 1)",
         )
 
+    @patch("detector.line_detection._verify_line_with_projection_profile",
+           return_value=_PROFILE_FAIL)
     @patch("detector.line_detection.cv2.HoughLinesP",
            return_value=_hline(_H_CENTER_ROI_Y))
     @patch("detector.line_detection.prepare_frame_for_line_detection",
@@ -182,6 +188,72 @@ class HorizontalDetectionTests(unittest.TestCase):
         self.assertFalse(
             result_strict["has_horizontal_line"],
             "dominance=0.15 should fail fft_min_dominance=0.90 (Fix 2)",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Profile gate tests (horizontal)
+# ---------------------------------------------------------------------------
+
+class ProfileGateTests(unittest.TestCase):
+
+    @patch("detector.line_detection._verify_line_with_projection_profile",
+           return_value=_PROFILE_FAIL)
+    @patch("detector.line_detection._verify_line_with_fft", return_value=_FFT_OK)
+    @patch("detector.line_detection.cv2.HoughLinesP",
+           return_value=_hline(_H_CENTER_ROI_Y))
+    @patch("detector.line_detection.prepare_frame_for_line_detection",
+           return_value=_FakeImage(_H, _W))
+    def test_profile_gate_off_by_default_preserves_behaviour(self, *_):
+        """Gate off by default: low-profile FFT-confirmed line is still detected.
+
+        Even when the profile verifier reports failure, enable_profile_gate=False
+        (the default) means detection_confirmed is computed exactly as before.
+        The advisory key profile_confirmed is recorded in quality_gate but does
+        not alter the outcome.
+        """
+        result = detect_horizontal_line(_FRAME)
+        self.assertTrue(
+            result["has_horizontal_line"],
+            msg="Profile gate is OFF by default — line must be detected regardless of profile",
+        )
+        gate = result.get("debug_line_info", {}).get("quality_gate", {})
+        self.assertIn("profile_confirmed", gate, "Advisory key must always be recorded")
+        self.assertFalse(gate["profile_confirmed"], "Advisory must reflect the mocked failure")
+
+    @patch("detector.line_detection._verify_line_with_projection_profile",
+           return_value=_PROFILE_FAIL)
+    @patch("detector.line_detection._verify_line_with_fft", return_value=_FFT_OK)
+    @patch("detector.line_detection.cv2.HoughLinesP",
+           return_value=_hline(_H_CENTER_ROI_Y))
+    @patch("detector.line_detection.prepare_frame_for_line_detection",
+           return_value=_FakeImage(_H, _W))
+    def test_profile_gate_rejects_horizon_when_enabled(self, *_):
+        """Fix for IMPROVEMENT_PLAN 'Remaining limitation': horizon case.
+
+        A horizon passes FFT (narrow ROI genuinely has horizontal energy) but fails
+        the spatial profile (gradient is spread across many rows, not localised).
+        With enable_profile_gate=True the detection must be rejected.
+        """
+        result = detect_horizontal_line(_FRAME, enable_profile_gate=True)
+        self.assertFalse(
+            result["has_horizontal_line"],
+            msg="FFT-confirmed but profile-failed line must be rejected when gate is enabled",
+        )
+
+    @patch("detector.line_detection._verify_line_with_projection_profile",
+           return_value=_PROFILE_OK)
+    @patch("detector.line_detection._verify_line_with_fft", return_value=_FFT_OK)
+    @patch("detector.line_detection.cv2.HoughLinesP",
+           return_value=_hline(_H_CENTER_ROI_Y))
+    @patch("detector.line_detection.prepare_frame_for_line_detection",
+           return_value=_FakeImage(_H, _W))
+    def test_profile_gate_confirms_true_seam_when_enabled(self, *_):
+        """True seam passes both FFT and spatial profile → detected with gate enabled."""
+        result = detect_horizontal_line(_FRAME, enable_profile_gate=True)
+        self.assertTrue(
+            result["has_horizontal_line"],
+            msg="FFT-confirmed + profile-confirmed line must be detected with gate enabled",
         )
 
 
@@ -229,6 +301,24 @@ class VerticalDetectionTests(unittest.TestCase):
         self.assertFalse(
             result["has_vertical_line"],
             "High-coverage vertical Hough line must be rejected when FFT=False (Fix 1)",
+        )
+
+    @patch("detector.line_detection._verify_line_with_projection_profile",
+           return_value=_PROFILE_FAIL)
+    @patch("detector.line_detection._verify_vertical_line_with_fft", return_value=_FFT_OK)
+    @patch("detector.line_detection.cv2.HoughLinesP",
+           return_value=_vline(_V_CENTER_ROI_X))
+    @patch("detector.line_detection.prepare_frame_for_line_detection",
+           return_value=_FakeImage(_VH, _VW))
+    def test_profile_gate_rejects_horizon_when_enabled_vertical(self, *_):
+        """Mirror of horizon-rejection test on the vertical path.
+
+        FFT confirmed but profile failed → rejected when enable_profile_gate=True.
+        """
+        result = detect_vertical_line(_VFRAME, enable_profile_gate=True)
+        self.assertFalse(
+            result["has_vertical_line"],
+            msg="FFT-confirmed but profile-failed vertical line must be rejected when gate is on",
         )
 
 

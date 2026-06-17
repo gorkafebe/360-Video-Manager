@@ -65,12 +65,15 @@ def _verify_line_with_fft(gray_roi: np.ndarray, min_dominance: float = 0.10) -> 
         return {"confirmed": False, "confidence": 0.0, "dominance": 0.0}
 
     gray_f = gray_roi.astype(np.float32) / 255.0
+    _h, _w = gray_f.shape
+    gray_f = gray_f * np.outer(np.hanning(_h), np.hanning(_w))
     fft2 = np.fft.fft2(gray_f)
     fft_shift = np.fft.fftshift(fft2)
     magnitude = np.log1p(np.abs(fft_shift))
 
     h, w = magnitude.shape
     cy, cx = h // 2, w // 2
+    magnitude[cy, cx] = 0.0  # suppress DC bin
 
     # Column strip around cx (u≈0 in frequency domain): captures energy from horizontal
     # edges, which vary in y but are constant in x — exactly what a face seam looks like.
@@ -106,6 +109,9 @@ def detect_horizontal_line(
     fft_min_dominance: float = 0.10,
     strong_coverage_ratio: float = 0.40,
     morph_length_ratio: float = 0.02,
+    enable_profile_gate: bool = False,
+    profile_min_coverage_ratio: float = 0.20,
+    profile_min_prominence: float = 3.0,
 ) -> Dict[str, Any]:
     """Detect a centred horizontal seam line in *frame*.
 
@@ -437,6 +443,14 @@ def detect_horizontal_line(
             fft_check = _verify_line_with_fft(roi, min_dominance=fft_min_dominance)
             fft_confirmed = bool(fft_check["confirmed"])
 
+            profile_check = _verify_line_with_projection_profile(
+                roi,
+                orientation="horizontal",
+                min_coverage_ratio=profile_min_coverage_ratio,
+                min_prominence=profile_min_prominence,
+            )
+            profile_confirmed = bool(profile_check["confirmed"])
+
             continuity_ratio = float(best_candidate.get("continuity_ratio", 1.0))
             quality = _compute_candidate_quality(
                 line_length=float(best_candidate["line_length"]),
@@ -484,6 +498,8 @@ def detect_horizontal_line(
                     and continuity_ok
                     and (slope_tight or high_coverage)
                 )
+            if enable_profile_gate and not profile_confirmed:
+                detection_confirmed = False
             logger.debug(
                 "[LINE_H] fft_confirmed=%s dominance=%.3f quality=%.3f "
                 "strict_centered=%s slope_tight=%s high_coverage=%s continuity_ok=%s -> %s",
@@ -509,6 +525,9 @@ def detect_horizontal_line(
                 "strong_coverage_px": float(strong_coverage_px),
                 "quality_score": float(quality["quality_score"]),
                 "continuity_ratio": float(continuity_ratio),
+                "profile_confirmed": profile_confirmed,
+                "profile_coverage_ratio": profile_check["coverage_ratio"],
+                "profile_prominence": profile_check["peak_prominence"],
             }
             debug_line_info["quality_metrics"] = quality
 
@@ -578,12 +597,15 @@ def _verify_vertical_line_with_fft(gray_roi: np.ndarray, min_dominance: float = 
         return {"confirmed": False, "confidence": 0.0, "dominance": 0.0}
 
     gray_f = gray_roi.astype(np.float32) / 255.0
+    _h, _w = gray_f.shape
+    gray_f = gray_f * np.outer(np.hanning(_h), np.hanning(_w))
     fft2 = np.fft.fft2(gray_f)
     fft_shift = np.fft.fftshift(fft2)
     magnitude = np.log1p(np.abs(fft_shift))
 
     h, w = magnitude.shape
     cy, cx = h // 2, w // 2
+    magnitude[cy, cx] = 0.0  # suppress DC bin
 
     # Row strip around cy (v≈0): captures energy from vertical edges,
     # which vary in x but are constant in y — exactly what a left-right seam looks like.
@@ -607,6 +629,50 @@ def _verify_vertical_line_with_fft(gray_roi: np.ndarray, min_dominance: float = 
     return {"confirmed": bool(confirmed), "confidence": confidence, "dominance": float(dominance)}
 
 
+def _verify_line_with_projection_profile(
+    gray_roi: np.ndarray,
+    orientation: str = "horizontal",
+    min_coverage_ratio: float = 0.20,
+    min_prominence: float = 3.0,
+) -> Dict[str, Any]:
+    """Spatial confirmer: checks that gradient spike is localised at one row/column.
+
+    For 'horizontal': Sobel_y, reduce mean-abs across columns → per-row profile;
+    peak prominence = peak / (median + eps); coverage = fraction of columns whose
+    per-column gradient peak falls within ±1 row of the global peak row.
+    For 'vertical': transpose roi before applying the same logic.
+    Returns {confirmed, coverage_ratio, peak_prominence, peak_index}.
+    """
+    _FAIL: Dict[str, Any] = {
+        "confirmed": False, "coverage_ratio": 0.0, "peak_prominence": 0.0, "peak_index": -1
+    }
+    if gray_roi.size == 0 or gray_roi.shape[0] < 4 or gray_roi.shape[1] < 4:
+        return _FAIL
+    try:
+        work = gray_roi if orientation == "horizontal" else gray_roi.T
+        h, w = work.shape[:2]
+        if h < 4 or w < 4:
+            return _FAIL
+        sobel = cv2.Sobel(work.astype(np.float32), cv2.CV_32F, 0, 1, ksize=3)
+        abs_sobel = np.abs(sobel)                      # (h, w)
+        profile = np.mean(abs_sobel, axis=1)           # (h,) per-row mean gradient
+        peak_idx = int(np.argmax(profile))
+        peak_val = float(profile[peak_idx])
+        prominence = peak_val / (float(np.median(profile)) + 1e-8)
+        col_peaks = np.argmax(abs_sobel, axis=0)       # (w,) per-col peak row
+        near_peak = np.abs(col_peaks.astype(np.int32) - peak_idx) <= 1
+        coverage_ratio = float(np.sum(near_peak)) / max(w, 1)
+        confirmed = bool(coverage_ratio >= min_coverage_ratio and prominence >= min_prominence)
+        return {
+            "confirmed": confirmed,
+            "coverage_ratio": coverage_ratio,
+            "peak_prominence": float(prominence),
+            "peak_index": peak_idx,
+        }
+    except Exception:
+        return _FAIL
+
+
 def detect_vertical_line(
     frame: np.ndarray,
     center_tolerance_ratio: float = 0.02,
@@ -618,6 +684,9 @@ def detect_vertical_line(
     fft_min_dominance: float = 0.10,
     strong_coverage_ratio: float = 0.40,
     morph_length_ratio: float = 0.02,
+    enable_profile_gate: bool = False,
+    profile_min_coverage_ratio: float = 0.20,
+    profile_min_prominence: float = 3.0,
 ) -> Dict[str, Any]:
     """Detect a centred vertical seam line in *frame*.
 
@@ -927,6 +996,14 @@ def detect_vertical_line(
             fft_check = _verify_vertical_line_with_fft(roi, min_dominance=fft_min_dominance)
             fft_confirmed = bool(fft_check["confirmed"])
 
+            profile_check = _verify_line_with_projection_profile(
+                roi,
+                orientation="vertical",
+                min_coverage_ratio=profile_min_coverage_ratio,
+                min_prominence=profile_min_prominence,
+            )
+            profile_confirmed = bool(profile_check["confirmed"])
+
             continuity_ratio = float(best_candidate.get("continuity_ratio", 1.0))
             quality = _compute_candidate_quality(
                 line_length=float(best_candidate["line_length"]),
@@ -971,6 +1048,8 @@ def detect_vertical_line(
                     and continuity_ok
                     and (slope_tight or high_coverage)
                 )
+            if enable_profile_gate and not profile_confirmed:
+                detection_confirmed = False
             logger.debug(
                 "[LINE_V] fft_confirmed=%s dominance=%.3f quality=%.3f "
                 "strict_centered=%s slope_tight=%s high_coverage=%s continuity_ok=%s -> %s",
@@ -996,6 +1075,9 @@ def detect_vertical_line(
                 "strong_coverage_px": float(strong_coverage_px),
                 "quality_score": float(quality["quality_score"]),
                 "continuity_ratio": float(continuity_ratio),
+                "profile_confirmed": profile_confirmed,
+                "profile_coverage_ratio": profile_check["coverage_ratio"],
+                "profile_prominence": profile_check["peak_prominence"],
             }
             debug_line_info["quality_metrics"] = quality
 

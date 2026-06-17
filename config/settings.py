@@ -168,6 +168,13 @@ class Settings:
         self.line_fft_min_dominance: float = _env_float("VPD_LINE_FFT_MIN_DOMINANCE", 0.10)
         self.line_strong_coverage_ratio: float = _env_float("VPD_LINE_STRONG_COVERAGE_RATIO", 0.40)
         self.line_morph_length_ratio: float = _env_float("VPD_LINE_MORPH_LENGTH_RATIO", 0.02)
+        self.line_enable_profile_gate: bool = _env_bool("VPD_LINE_ENABLE_PROFILE_GATE", False)
+        self.line_profile_min_coverage_ratio: float = _env_float(
+            "VPD_LINE_PROFILE_MIN_COVERAGE_RATIO", 0.20
+        )
+        self.line_profile_min_prominence: float = _env_float(
+            "VPD_LINE_PROFILE_MIN_PROMINENCE", 3.0
+        )
         self.stereo_hist_similarity_threshold: float = _env_float(
             "VPD_STEREO_HIST_THRESHOLD", 0.92
         )
@@ -226,6 +233,9 @@ class Settings:
             "line_fft_min_dominance": self.line_fft_min_dominance,
             "line_strong_coverage_ratio": self.line_strong_coverage_ratio,
             "line_morph_length_ratio": self.line_morph_length_ratio,
+            "line_enable_profile_gate": self.line_enable_profile_gate,
+            "line_profile_min_coverage_ratio": self.line_profile_min_coverage_ratio,
+            "line_profile_min_prominence": self.line_profile_min_prominence,
             "stereo_hist_similarity_threshold": self.stereo_hist_similarity_threshold,
             "stereo_seam_guard_ratio": self.stereo_seam_guard_ratio,
             "stereo_min_valid_half_ratio": self.stereo_min_valid_half_ratio,

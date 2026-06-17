@@ -143,3 +143,61 @@ A single strong horizontal content edge at frame centre (e.g. a stationary equir
 python scripts/diagnose_line_detection.py video.mp4 --frames 10
 python scripts/diagnose_line_detection.py video.mp4 --fft-min-dominance 0.20
 ```
+
+---
+
+## Session 4 — Spatial Profile Gate + FFT Hardening (2026-06-16)
+
+Adds a deterministic, advisory-by-default spatial confirmer that addresses the "Remaining limitation" from Session 3.
+
+### Status table
+
+| Fix | Description | File | Status |
+|-----|-------------|------|--------|
+| 4.1 | FFT hardening: Hann window + DC bin suppression in both FFT verifiers | `line_detection.py:57–95`, `line_detection.py:612–649` | ✅ Applied |
+| 4.2 | New `_verify_line_with_projection_profile` — Sobel-based spatial localisation check | `line_detection.py` (between FFT verifiers and detect_vertical_line) | ✅ Applied |
+| 4.3 | 3 new params on `detect_horizontal_line` + `detect_vertical_line`: `enable_profile_gate`, `profile_min_coverage_ratio`, `profile_min_prominence` | `line_detection.py` | ✅ Applied |
+| 4.4 | Profile verifier called on every candidate; result recorded as advisory keys in `quality_gate` | `line_detection.py` | ✅ Applied |
+| 4.5 | Profile gate applied (gate off by default) — no existing test changes outcome | `line_detection.py` | ✅ Applied |
+
+### Why FFT hardening (Fix 4.1)
+
+The rectangular window (implicit in the original FFT) produces spectral leakage: energy from strong off-axis content bleeds into the orientation bands. The separable Hann window (`np.outer(np.hanning(h), np.hanning(w))`) tapers the edges to zero before transform, reducing leakage. Suppressing the DC bin (overall mean brightness) prevents bright ROIs from inflating both orientation bands and making dominance appear smaller than it is.
+
+### Why the projection profile (Fix 4.2)
+
+A real projection seam is a **single sharp discontinuity spanning the full frame**, localised at exactly one row (horizontal) or column (vertical). A natural horizon (the "Remaining limitation" from Session 3) is a textured gradient spread across many rows. Sobel_y on the narrow centre ROI produces a per-row profile; for a true seam the peak row accounts for >20% of columns (`coverage_ratio`) and the peak is >3× the median row energy (`prominence`). These two numbers discriminate the horizon case from a seam even when FFT cannot.
+
+### New env vars
+
+| Env var | Default | Effect |
+|---------|---------|--------|
+| `VPD_LINE_ENABLE_PROFILE_GATE` | `false` | Set `true` to make profile a hard gate (advisory until validated) |
+| `VPD_LINE_PROFILE_MIN_COVERAGE_RATIO` | `0.20` | Fraction of frame columns/rows that must agree on peak location |
+| `VPD_LINE_PROFILE_MIN_PROMINENCE` | `3.0` | Peak / median gradient ratio; raise to 5.0+ for stricter rejection |
+
+### Advisory keys added to `quality_gate`
+
+The following keys are always present in `debug_line_info["quality_gate"]` when a candidate is found (independent of whether the gate is enabled):
+
+- `profile_confirmed` (bool)
+- `profile_coverage_ratio` (float in [0, 1])
+- `profile_prominence` (float ≥ 0)
+
+Consumers (`draw_line_debug`, `debug_utils.draw_search_band`, `diagnose_line_detection.py`, tests) use `.get()` — additive keys are safe.
+
+### Default behaviour
+
+`enable_profile_gate=False` preserves byte-for-byte identical `detection_confirmed` logic. All 114 existing tests pass unchanged. 4 new tests cover advisory off-by-default, horizon rejection when enabled, true-seam confirmation when enabled, and the vertical path.
+
+### Enabling on real footage
+
+```bash
+# Advisory: inspect profile numbers without changing detection outcome
+python scripts/diagnose_line_detection.py video.mp4 --frames 10
+
+# Active gate: reject candidates that fail spatial localisation
+VPD_LINE_ENABLE_PROFILE_GATE=true \
+  python scripts/diagnose_line_detection.py video.mp4 --enable-profile-gate \
+  --profile-min-prominence 5.0 --frames 10
+```

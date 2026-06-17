@@ -284,7 +284,3 @@ def upload_video_asset(
     except Exception as exc:
         logger.exception("Critical error in upload_video_asset")
         raise MediaCMSError(f"Upload error: {exc}") from exc
-
-
-# Backward-compatible aliases
-post_video = upload_video_asset

@@ -163,7 +163,3 @@ def download_video(
     except Exception as exc:
         logger.exception("Unexpected download error")
         raise DownloadError(f"Unexpected download error: {exc}") from exc
-
-
-# Backward-compatible alias
-descargar_video = download_video

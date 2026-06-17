@@ -11,7 +11,6 @@ from .debug_utils import (
     create_run_debug_dir,
     draw_motion_vectors,
     draw_regions,
-    format_final_stats,
     log_discard,
     log_success,
     save_frame_debug,
@@ -34,11 +33,9 @@ from .motion_analysis import (
 from .projection_logic import decide_projection, evaluate_cubemap, evaluate_eac
 from .region_validation import is_region_valid
 from .equirectangular_detection import aggregate_equirectangular_evidence, compute_frame_equirectangular_evidence
-from .projection_conversion import convert_detected_projection_to_equirectangular
 from .stereo_detection import detect_stereo
 from .video_io import (
     FrameExtractorError,
-    convert_video_codec,
     extract_main_frames,
     extract_secondary_frames,
     open_video_capture,
@@ -1727,93 +1724,3 @@ def run_detection_with_retries(
         )
 
     return final_detection, final_debug_context
-
-
-def process_downloaded_video(video_path: str, output_dir: Optional[str] = None) -> Dict[str, Any]:
-    final_video_path = video_path  # updated below when compat conversion runs
-    try:
-        logger.info(f"Procesando video: {video_path}")
-
-        final_video_path = convert_video_codec(video_path)
-        final_detection, final_debug_context = run_detection_with_retries(
-            final_video_path,
-            num_frames=10,
-            debug_base_dir=CONFIG["main_runs_dir"],
-        )
-
-        final_stats = final_detection.get(
-            "stats",
-            {
-                "total_frames_extracted": 0,
-                "black_frames": 0,
-                "valid_frames_used": 0,
-                "discarded_frames": 0,
-                "pairs_total": 0,
-                "pairs_valid": 0,
-                "pairs_invalid": 0,
-                "regions_valid": 0,
-                "regions_invalid": 0,
-                "avg_eac_score": "N/A",
-                "avg_cubic_score": "N/A",
-                "score_margin": "N/A",
-                "final_classification": "unknown",
-                "final_confidence": 0.0,
-            },
-        )
-        format_final_stats(final_stats)
-
-        detected_projection = final_detection.get("projection_type", "unknown")
-
-        # Post-detection conversion: attempt to produce equirectangular output.
-        # Conversion runs after all detection is complete and never affects it.
-        # Pass the original video_path as name_source_path so that when a
-        # compatibility-transcoded intermediate was used the output file name
-        # is derived from the original file name, not the temp-file name.
-        conversion_output_dir = final_debug_context.get("run_dir") or None
-        conversion_result = convert_detected_projection_to_equirectangular(
-            video_path=final_video_path,
-            projection_type=detected_projection,
-            output_dir=conversion_output_dir,
-            name_source_path=video_path if final_video_path != video_path else None,
-        )
-
-        converted_to_equirectangular = bool(
-            conversion_result.get("success") and not conversion_result.get("skipped")
-        )
-        converted_video_path: Optional[str] = (
-            conversion_result.get("output_path") if converted_to_equirectangular else None
-        )
-
-        return {
-            "success": True,
-            "video_path": final_video_path,
-            "original_video_path": video_path,
-            "debug_run_dir": final_debug_context.get("run_dir"),
-            "projection_type": detected_projection,
-            "confidence": float(final_detection.get("confidence", 0.0)),
-            "frames_analyzed": int(final_detection.get("frames_analyzed", 0)),
-            "frames_with_line": int(final_detection.get("frames_with_line", 0)),
-            "frames_saved_for_analysis": final_detection.get("frames_with_line_saved", []),
-            "motion_reliable": bool(final_detection.get("motion_reliable", False)),
-            "motion_reliability_reason": final_detection.get("motion_reliability_reason", ""),
-            "motion_pairs_total": int(final_detection.get("motion_pairs_total", 0)),
-            "motion_pairs_valid": int(final_detection.get("motion_pairs_valid", 0)),
-            "motion_confidence": float(final_detection.get("motion_confidence", 0.0)),
-            "stats": final_stats,
-            "conversion": conversion_result,
-            "converted_to_equirectangular": converted_to_equirectangular,
-            "converted_video_path": converted_video_path,
-        }
-    except Exception as exc:
-        logger.exception("Error procesando video")
-        return {"success": False, "error": str(exc)}
-    finally:
-        # Clean up any compatibility-transcoded intermediate file.
-        # The temp file is only created when the source needed a codec
-        # fallback; in that case final_video_path differs from the original.
-        if final_video_path != video_path and os.path.exists(final_video_path):
-            try:
-                os.unlink(final_video_path)
-                logger.debug("[CLEANUP] Removed compat temp file: %s", final_video_path)
-            except OSError as exc:
-                logger.warning("[CLEANUP] Could not remove compat temp file %s: %s", final_video_path, exc)

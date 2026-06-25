@@ -38,6 +38,7 @@ DOWNLOADS_DIR           Override default download directory.
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -116,8 +117,15 @@ class Settings:
     """Immutable snapshot of all application configuration values."""
 
     def __init__(self) -> None:
-        # Resolve project root from env or by walking up from this file.
-        _auto_root = str(Path(__file__).resolve().parent.parent)
+        # Resolve project root from env, or by walking up from this file —
+        # except when frozen by PyInstaller, where this file lives inside a
+        # temporary extraction directory rather than next to the actual
+        # executable, so .env discovery and runtime dirs must anchor on
+        # sys.executable's directory instead.
+        if getattr(sys, "frozen", False):
+            _auto_root = os.path.dirname(sys.executable)
+        else:
+            _auto_root = str(Path(__file__).resolve().parent.parent)
         self.project_root: str = os.getenv("VPD_PROJECT_ROOT", _auto_root)
 
         # Load .env once so subsequent os.getenv calls see it.

@@ -71,3 +71,4 @@ Thumbs.db
 *.tar.gz
 *.tar
 *.rar
+!packaging/icon*.png

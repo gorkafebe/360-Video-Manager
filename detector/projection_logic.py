@@ -23,85 +23,93 @@ CUBEMAP_LAYOUT: Dict[tuple, tuple] = {
     (1, 2): ("BACK", 0.0),
 }
 
+# Expected angular difference (radians) between each pair of cube faces
+# derived from 3D cube geometry: adjacent faces = π/2, opposite = π.
+FACE_PAIR_EXPECTED_DIFF: Dict[Tuple[str, str], float] = {
+    ("FRONT", "LEFT"): _PI / 2,
+    ("FRONT", "RIGHT"): _PI / 2,
+    ("FRONT", "TOP"): _PI / 2,
+    ("FRONT", "BOTTOM"): _PI / 2,
+    ("FRONT", "BACK"): _PI,
+    ("LEFT", "RIGHT"): _PI,
+    ("LEFT", "TOP"): _PI / 2,
+    ("LEFT", "BOTTOM"): _PI / 2,
+    ("LEFT", "BACK"): _PI / 2,
+    ("RIGHT", "TOP"): _PI / 2,
+    ("RIGHT", "BOTTOM"): _PI / 2,
+    ("RIGHT", "BACK"): _PI / 2,
+    ("TOP", "BOTTOM"): _PI,
+    ("TOP", "BACK"): _PI / 2,
+    ("BOTTOM", "BACK"): _PI / 2,
+}
+
 
 def _angle_diff_signed(a: float, b: float) -> float:
     return float(np.arctan2(np.sin(a - b), np.cos(a - b)))
 
-    
+
 def _angle_diff_magnitude(a: float, b: float) -> float:
     return abs(_angle_diff_signed(a, b))
 
 
-def _score_layout_eac(face_angles: Dict[str, float], tolerance_rad: float) -> Tuple[List[float], List[str]]:
-    """Score EAC by relative symmetry, avoiding fixed absolute angular targets."""
+def _is_cross_row_pair(face_a: str, face_b: str, layout: Dict[tuple, tuple]) -> bool:
+    """Return True if face_a and face_b are in different rows of layout."""
+    row_map = {name: key[0] for key, (name, _) in layout.items()}
+    row_a = row_map.get(face_a)
+    row_b = row_map.get(face_b)
+    if row_a is None or row_b is None:
+        return False
+    return row_a != row_b
+
+
+def _score_layout_unified(
+    face_angles: Dict[str, float],
+    tolerance_rad: float,
+    layout: Dict[tuple, tuple],
+) -> Tuple[List[float], List[float], List[str]]:
+    """Score a layout by testing pairwise angular differences against
+    3D cube-geometry expectations. Both EAC and Cubic call this same
+    function; only the layout dict (and which corrections were applied
+    upstream) differs. Cross-row pairs carry weight 2.0, same-row 1.0."""
     scores: List[float] = []
+    weights: List[float] = []
     details: List[str] = []
 
-    # LEFT and RIGHT should be symmetric around FRONT: diff_left ~= -diff_right
-    if "LEFT" in face_angles and "RIGHT" in face_angles and "FRONT" in face_angles:
-        front = face_angles["FRONT"]
-        diff_l = _angle_diff_signed(face_angles["LEFT"], front)
-        diff_r = _angle_diff_signed(face_angles["RIGHT"], front)
-        error = abs(diff_l + diff_r)
+    available_faces = set(face_angles.keys())
+
+    for (fa, fb), expected in FACE_PAIR_EXPECTED_DIFF.items():
+        if fa not in available_faces or fb not in available_faces:
+            continue
+
+        observed = _angle_diff_magnitude(face_angles[fa], face_angles[fb])
+        error = abs(observed - expected)
         s = max(0.0, 1.0 - error / tolerance_rad)
+
+        cross = _is_cross_row_pair(fa, fb, layout)
+        w = 2.0 if cross else 1.0
         scores.append(s)
-        details.append(f"LR_sym={np.degrees(error):.0f}°/{s:.2f}")
-    elif "LEFT" in face_angles and "RIGHT" in face_angles:
-        # No FRONT available: use LEFT/RIGHT opposite-direction consistency.
-        diff_lr = _angle_diff_signed(face_angles["LEFT"], face_angles["RIGHT"])
-        error = abs(abs(diff_lr) - _PI)
-        s = max(0.0, 1.0 - error / tolerance_rad)
-        scores.append(s)
-        details.append(f"LR_nof={np.degrees(diff_lr):.0f}°/{s:.2f}")
+        weights.append(w)
+        prefix = "cross" if cross else "same"
+        details.append(
+            f"{prefix}:{fa[0]}/{fb[0]}"
+            f"={np.degrees(observed):.0f}°"
+            f"(exp={np.degrees(expected):.0f}°)"
+            f"/{s:.2f}w{w:.0f}"
+        )
 
-    # BACK and FRONT are opposite cube faces, so |diff| should be near pi.
-    if "BACK" in face_angles and "FRONT" in face_angles:
-        diff = _angle_diff_signed(face_angles["BACK"], face_angles["FRONT"])
-        mag_diff = _angle_diff_magnitude(diff, 0.0)
-        error = abs(mag_diff - _PI)
-        s = max(0.0, 1.0 - error / tolerance_rad)
-        scores.append(s)
-        details.append(f"B=|{np.degrees(mag_diff):.0f}°|/{s:.2f}")
-
-    return scores, details
+    return scores, weights, details
 
 
-def _score_layout_cubemap(face_angles: Dict[str, float], tolerance_rad: float) -> Tuple[List[float], List[str]]:
-    """Score cubemap by perpendicular side faces relative to FRONT."""
-    scores: List[float] = []
-    details: List[str] = []
-    half_pi = _PI / 2.0
-
-    if "LEFT" in face_angles and "FRONT" in face_angles:
-        diff = _angle_diff_signed(face_angles["LEFT"], face_angles["FRONT"])
-        error = abs(abs(diff) - half_pi)
-        s = max(0.0, 1.0 - error / tolerance_rad)
-        scores.append(s)
-        details.append(f"L={np.degrees(diff):.0f}°/{s:.2f}")
-
-    if "RIGHT" in face_angles and "FRONT" in face_angles:
-        diff = _angle_diff_signed(face_angles["RIGHT"], face_angles["FRONT"])
-        error = abs(abs(diff) - half_pi)
-        s = max(0.0, 1.0 - error / tolerance_rad)
-        scores.append(s)
-        details.append(f"R={np.degrees(diff):.0f}°/{s:.2f}")
-
-    if "LEFT" in face_angles and "RIGHT" in face_angles and "FRONT" not in face_angles:
-        diff_lr = _angle_diff_signed(face_angles["LEFT"], face_angles["RIGHT"])
-        error = abs(abs(diff_lr) - _PI)
-        s = max(0.0, 1.0 - error / tolerance_rad)
-        scores.append(s)
-        details.append(f"LR_nof={np.degrees(diff_lr):.0f}°/{s:.2f}")
-
-    if "BACK" in face_angles and "FRONT" in face_angles:
-        diff = _angle_diff_signed(face_angles["BACK"], face_angles["FRONT"])
-        mag_diff = _angle_diff_magnitude(diff, 0.0)
-        error = abs(mag_diff - _PI)
-        s = max(0.0, 1.0 - error / tolerance_rad)
-        scores.append(s)
-        details.append(f"B=|{np.degrees(mag_diff):.0f}°|/{s:.2f}")
-
-    return scores, details
+def _raw_signal_is_degenerate(raw_angles: List[float], tolerance_rad: float) -> bool:
+    """Return True when raw region angles carry no discriminating signal
+    (every pairwise difference is smaller than the scoring tolerance)."""
+    if len(raw_angles) < 2:
+        return False
+    for i in range(len(raw_angles)):
+        for j in range(i + 1, len(raw_angles)):
+            if _angle_diff_magnitude(raw_angles[i], raw_angles[j]) >= tolerance_rad:
+                return False
+    return True
 
 
 def _score_layout(
@@ -112,24 +120,33 @@ def _score_layout(
     tolerancia_45_deg: float,
 ) -> Tuple[Optional[float], List[str]]:
     face_angles: Dict[str, float] = {}
+    raw_angles: List[float] = []
     for key, (face_name, correction) in layout.items():
         info = region_info.get(key)
         if not is_region_valid(info, min_concentration=min_concentration, min_active_ratio=min_active_ratio):
             continue
         raw = float(info["angle"])
+        raw_angles.append(raw)
         corrected = float(np.arctan2(np.sin(raw + correction), np.cos(raw + correction)))
         face_angles[face_name] = corrected
 
     tolerance_rad = float(np.radians(tolerancia_45_deg))
-    if layout is EAC_LAYOUT:
-        scores, details = _score_layout_eac(face_angles, tolerance_rad)
-    else:
-        scores, details = _score_layout_cubemap(face_angles, tolerance_rad)
 
-    if len(scores) < 1:
+    if _raw_signal_is_degenerate(raw_angles, tolerance_rad):
+        return None, ["insufficient:degenerate_raw_signal"]
+
+    scores, weights, details = _score_layout_unified(face_angles, tolerance_rad, layout)
+
+    if not scores:
         return None, details
 
-    return float(np.mean(scores)), details
+    has_cross_row = any(d.startswith("cross:") for d in details)
+    if not has_cross_row:
+        return None, details + ["insufficient:no_cross_row_pair"]
+
+    total_weight = sum(weights)
+    weighted_score = sum(s * w for s, w in zip(scores, weights)) / total_weight
+    return float(weighted_score), details
 
 
 def evaluate_eac(

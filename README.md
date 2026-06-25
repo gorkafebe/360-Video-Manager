@@ -213,8 +213,13 @@ The detector (`detector/pipeline.py`) runs without ML models:
 2. Horizontal / vertical seam detection — a central structural line is the
    primary cue for non-equirectangular content.
 3. Stereo histogram matching — identifies stereo-equirectangular layouts.
-4. Dense optical-flow analysis — Farneback or DIS; per-region directional
-   aggregation; EAC vs cubemap hypothesis scoring.
+4. Dense optical-flow analysis — capability-aware backend selection among
+   Farneback, DIS, TV-L1, DeepFlow, PCAFlow and SparseToDense (all dense;
+   no Lucas-Kanade / sparse tracking is used anywhere in the detector);
+   per-region directional aggregation, refined per-region by ORB + RANSAC
+   affine matching when enough keypoint matches are found (the optical-flow
+   angle is the fallback, not the primary source, whenever ORB succeeds);
+   EAC vs cubemap hypothesis scoring.
 5. Equirectangular wrap-around boundary-continuity evidence.
 6. Reliability gate — if confidence is too low or too few valid frames were
    analysed, the detection result is `unknown`.
@@ -318,11 +323,11 @@ root. Defaults shown are the values used when a variable is not set.
 | `VPD_STEREO_MIN_SEAM_FRAMES` | `2` | Minimum seam-detected frames required before stereo classification runs |
 | `VPD_STEREO_MIN_STABILITY_RATIO` | `0.55` | Minimum temporal match stability ratio for stereo decision |
 | `VPD_SAVE_STEREO_HALVES` | `true` | Save left/right half-frame debug images |
-| `VPD_FLOW_ALGORITHM` | `deepflow` | Preferred optical-flow algorithm hint; rollout profile and runtime capabilities can override to a higher-priority available algorithm |
-| `VPD_FLOW_ENABLE_REFINEMENT` | `false` | Enable optional variational refinement on top of base optical flow |
-| `VPD_FLOW_ENABLE_FB_CHECK` | `false` | Enable forward-backward optical-flow consistency filtering |
+| `VPD_FLOW_ALGORITHM` | `deepflow` | Optical-flow algorithm hint. Under the default rollout profile (`high_accuracy`), Tier B (`tvl1`, `dis`) is always tried before this value, so `deepflow` is rarely the algorithm actually executed unless neither Tier B option is available — see "Motion rollout profile behavior" below |
+| `VPD_FLOW_ENABLE_REFINEMENT` | `false` | Enable optional variational refinement on top of base optical flow. **Forced to `true`** under `VPD_MOTION_ROLLOUT_PROFILE=robust` or `high_accuracy` (the default) regardless of this variable |
+| `VPD_FLOW_ENABLE_FB_CHECK` | `false` | Enable forward-backward optical-flow consistency filtering. **Forced to `true`** under `robust`/`high_accuracy` (the default) regardless of this variable |
 | `VPD_FLOW_FB_THRESHOLD` | `1.5` | Forward-backward consistency threshold in pixels |
-| `VPD_ENABLE_GEOMETRY_EVIDENCE` | `false` | Enable geometry-evidence fusion from robust homography fitting |
+| `VPD_ENABLE_GEOMETRY_EVIDENCE` | `false` | Enable geometry-evidence fusion from robust homography fitting. **Forced to `true`** under `robust`/`high_accuracy` (the default) regardless of this variable |
 | `VPD_GEOMETRY_EVIDENCE_WEIGHT` | `0.20` | Blend weight for geometry evidence in EAC-vs-cubic scoring |
 | `VPD_MOTION_ROLLOUT_PROFILE` | `high_accuracy` | Motion profile: `baseline`, `robust`, `high_accuracy` |
 | `VPD_FORCE_FULL_CODEC_NORMALIZATION` | `false` | Re-enable legacy full-file pre-normalization transcode before detection |
@@ -335,7 +340,9 @@ root. Defaults shown are the values used when a variable is not set.
 
 Runtime flow selection is capability-aware and deterministic:
 - `baseline`: `farneback` safe default (or `dis` only when explicitly requested and available).
-- `robust` / `high_accuracy`: prefer Tier B when available; Tier C is fallback; final fallback is always `farneback`.
+- `robust` / `high_accuracy`: prefer Tier B when available; Tier C is fallback; final fallback is always `farneback`. Tier B is always tried first regardless of which algorithm `VPD_FLOW_ALGORITHM` requests, so a Tier C request (e.g. the `deepflow` default) is only honoured when no Tier B backend is available.
+- `robust` / `high_accuracy` additionally **force-enable** `VPD_FLOW_ENABLE_REFINEMENT`, `VPD_FLOW_ENABLE_FB_CHECK`, and `VPD_ENABLE_GEOMETRY_EVIDENCE` to `true`, overriding their individual environment values. These three variables only take their literal configured value under `baseline`.
+- Tier B/C algorithms (`tvl1`, `dis`, `deepflow`, `pcaflow`, `sparse_to_dense`) all require `cv2.optflow` (the OpenCV *contrib* module, see Prerequisites). If it is unavailable, the runtime falls back to `dis` (if present in the OpenCV build) or `farneback`, even when a Tier B/C algorithm was requested.
 
 Safety invariants:
 - Non-equirectangular classification with failed reliability is downgraded to `unknown`.
@@ -359,6 +366,14 @@ Current test files:
 | `tests/test_fallback_and_adaptive.py` | `unknown → eac` conversion fallback; `equirectangular`/`stereo_equi` skip behaviour; low-confidence skip; adaptive wraplength formula |
 | `tests/test_uploader.py` | Playlist endpoint URL construction; robustness against trailing slashes and non-`/media` API paths |
 | `tests/test_youtube.py` | Ordered de-duplication of search results; 360° projection filter; URL video ID extraction |
+| `tests/test_detection_retry.py` | Retry-plan frame/spacing schedule; per-profile motion-flag resolution (Tier B over Tier C); 50% ratio gate in `run_detection_pipeline`; conditional codec normalisation in `process_video_job` |
+| `tests/test_line_and_stereo_strictness.py` | Rejection of fragmented high-coverage line candidates; strict-centering rejection; seam-region-aware vs. fixed-center-split stereo policy; minimum seam-frame requirement |
+| `tests/test_line_detection.py` | Hough/LSD/fitLine base cases; short-fragment, diagonal-slope, and off-center rejection; FFT-bypass regression guard; configurable `fft_min_dominance`; advisory vs. enforced spatial profile gate (horizontal and vertical) |
+| `tests/test_motion_classification_policy.py` | Forced classification under consistent cross-signal evidence; `unknown` retained under contradictory evidence |
+| `tests/test_motion_flow_fallback.py` | Optical-flow fallback chain under `robust` and `baseline` profiles, with and without `cv2.optflow` capability |
+| `tests/test_projection_conversion.py` | `v360` filter padding; `-hwaccel` presence/absence on filtered vs. stream-copy paths; hardware-encoder vs. video-dimension failure detection; automatic `libx264` retry; empty-output-file cleanup |
+| `tests/test_video_io_av1.py` | AV1 codec omits `-hwaccel` on transcode; H.264 retains it; routing to parallel ffmpeg extraction above `MAX_SINGLE_PASS_FRAMES`; parallel-to-`select=` fallback |
+| `tests/test_video_io_sampling.py` | ffmpeg sampling fallback when OpenCV can't decode; `probe_video_stream` mtime-keyed cache; shared `VideoCapture` session reuse; enriched error diagnostics on hard failure |
 
 ---
 

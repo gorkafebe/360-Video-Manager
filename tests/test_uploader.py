@@ -6,11 +6,16 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, mock_open, patch
 
+import requests
+
 from core.uploader import (
     _build_endpoint,
+    _is_disguised_timeout,
+    _upload_timeout,
     get_playlists,
     upload_video_asset,
 )
+from utils.exceptions import MediaCMSError
 
 
 class BuildEndpointTests(unittest.TestCase):
@@ -240,6 +245,206 @@ class UploadMetadataTests(unittest.TestCase):
         self.assertTrue(result.success)
         mock_create_playlist.assert_not_called()
         mock_add_to_playlist.assert_called_once_with("tok-321", "pl-existing", api_url="https://cms.example.com/api/v1/media")
+
+
+class UploadTimeoutTests(unittest.TestCase):
+    """_upload_timeout scales the read timeout with file size."""
+
+    def test_missing_file_falls_back_to_default(self):
+        self.assertEqual(_upload_timeout("/no/such/file.mp4"), (10, 300))
+
+    @patch("os.path.getsize", return_value=10 * 1024 * 1024)
+    def test_small_file_uses_floor_timeout(self, _mock_getsize):
+        self.assertEqual(_upload_timeout("/tmp/small.mp4"), (10, 300))
+
+    @patch("os.path.getsize", return_value=5000 * 1024 * 1024)
+    def test_large_file_scales_up(self, _mock_getsize):
+        self.assertEqual(_upload_timeout("/tmp/large.mp4"), (10, 3600))
+
+
+class DisguisedTimeoutTests(unittest.TestCase):
+    """A send-phase socket timeout is wrapped by requests as ConnectionError."""
+
+    def test_connection_error_wrapping_timeout_error_is_detected(self):
+        protocol_error = Exception("Connection aborted.", TimeoutError("timed out"))
+        exc = requests.ConnectionError(protocol_error)
+        self.assertTrue(_is_disguised_timeout(exc))
+
+    def test_connection_error_without_timeout_cause_is_not_detected(self):
+        protocol_error = Exception("Connection aborted.", ValueError("bad chunk"))
+        exc = requests.ConnectionError(protocol_error)
+        self.assertFalse(_is_disguised_timeout(exc))
+
+    @patch("core.uploader.time.sleep")
+    @patch("config.settings.get_settings")
+    @patch("requests.post")
+    @patch("os.path.exists", return_value=True)
+    def test_upload_reports_clear_message_on_disguised_timeout(
+        self,
+        _mock_exists,
+        mock_post,
+        mock_get_settings,
+        _mock_sleep,
+    ):
+        mock_get_settings.return_value = SimpleNamespace(
+            cms_api_url="https://cms.example.com/api/v1/media",
+            cms_token=None,
+            cms_user=None,
+            cms_password=None,
+        )
+        protocol_error = Exception("Connection aborted.", TimeoutError("timed out"))
+        mock_post.side_effect = requests.ConnectionError(protocol_error)
+
+        with patch("builtins.open", mock_open(read_data=b"video-bytes")):
+            with self.assertRaises(MediaCMSError) as ctx:
+                upload_video_asset(
+                    video_path="/tmp/video.mp4",
+                    title="T",
+                    api_url="https://cms.example.com/api/v1/media",
+                )
+
+        self.assertIn("timed out", str(ctx.exception).lower())
+        self.assertEqual(mock_post.call_count, 3)
+
+
+class UploadRetryTests(unittest.TestCase):
+    """Only the verified-safe disguised send-phase timeout is retried."""
+
+    def setUp(self):
+        self.fake_settings = SimpleNamespace(
+            cms_api_url="https://cms.example.com/api/v1/media",
+            cms_token=None,
+            cms_user=None,
+            cms_password=None,
+        )
+
+    @patch("core.uploader.time.sleep")
+    @patch("config.settings.get_settings")
+    @patch("requests.post")
+    @patch("os.path.exists", return_value=True)
+    def test_disguised_timeout_then_success_retries_and_succeeds(
+        self, _mock_exists, mock_post, mock_get_settings, mock_sleep,
+    ):
+        mock_get_settings.return_value = self.fake_settings
+        protocol_error = Exception("Connection aborted.", TimeoutError("timed out"))
+        success_resp = MagicMock(status_code=201)
+        success_resp.json.return_value = {
+            "friendly_token": "tok-1",
+            "media_url": "https://cms.example.com/m/tok-1",
+        }
+        mock_post.side_effect = [requests.ConnectionError(protocol_error), success_resp]
+
+        with patch("builtins.open", mock_open(read_data=b"video-bytes")):
+            result = upload_video_asset(
+                video_path="/tmp/video.mp4",
+                title="T",
+                api_url="https://cms.example.com/api/v1/media",
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(mock_post.call_count, 2)
+        mock_sleep.assert_called_once()
+
+    @patch("core.uploader.time.sleep")
+    @patch("config.settings.get_settings")
+    @patch("requests.post")
+    @patch("os.path.exists", return_value=True)
+    def test_disguised_timeout_exhausts_retries_raises_original_message(
+        self, _mock_exists, mock_post, mock_get_settings, _mock_sleep,
+    ):
+        mock_get_settings.return_value = self.fake_settings
+        protocol_error = Exception("Connection aborted.", TimeoutError("timed out"))
+        mock_post.side_effect = requests.ConnectionError(protocol_error)
+
+        with patch("builtins.open", mock_open(read_data=b"video-bytes")):
+            with self.assertRaises(MediaCMSError) as ctx:
+                upload_video_asset(
+                    video_path="/tmp/video.mp4",
+                    title="T",
+                    api_url="https://cms.example.com/api/v1/media",
+                )
+
+        self.assertEqual(
+            str(ctx.exception),
+            "Upload timed out or the connection was lost mid-transfer. "
+            "Check CMS_API_URL, network connectivity, and file size.",
+        )
+        self.assertEqual(mock_post.call_count, 3)
+
+    @patch("core.uploader.time.sleep")
+    @patch("config.settings.get_settings")
+    @patch("requests.post")
+    @patch("os.path.exists", return_value=True)
+    def test_plain_timeout_is_not_retried(
+        self, _mock_exists, mock_post, mock_get_settings, mock_sleep,
+    ):
+        mock_get_settings.return_value = self.fake_settings
+        mock_post.side_effect = requests.Timeout("read timed out")
+
+        with patch("builtins.open", mock_open(read_data=b"video-bytes")):
+            with self.assertRaises(MediaCMSError) as ctx:
+                upload_video_asset(
+                    video_path="/tmp/video.mp4",
+                    title="T",
+                    api_url="https://cms.example.com/api/v1/media",
+                )
+
+        self.assertEqual(
+            str(ctx.exception),
+            "Upload timed out. Check CMS_API_URL and network connectivity.",
+        )
+        self.assertEqual(mock_post.call_count, 1)
+        mock_sleep.assert_not_called()
+
+    @patch("core.uploader.time.sleep")
+    @patch("config.settings.get_settings")
+    @patch("requests.post")
+    @patch("os.path.exists", return_value=True)
+    def test_plain_connection_error_is_not_retried(
+        self, _mock_exists, mock_post, mock_get_settings, mock_sleep,
+    ):
+        mock_get_settings.return_value = self.fake_settings
+        protocol_error = Exception("Connection aborted.", ValueError("bad chunk"))
+        mock_post.side_effect = requests.ConnectionError(protocol_error)
+
+        with patch("builtins.open", mock_open(read_data=b"video-bytes")):
+            with self.assertRaises(MediaCMSError) as ctx:
+                upload_video_asset(
+                    video_path="/tmp/video.mp4",
+                    title="T",
+                    api_url="https://cms.example.com/api/v1/media",
+                )
+
+        self.assertNotIn("timed out", str(ctx.exception).lower())
+        self.assertEqual(mock_post.call_count, 1)
+        mock_sleep.assert_not_called()
+
+    @patch("core.uploader.time.sleep")
+    @patch("config.settings.get_settings")
+    @patch("requests.post")
+    @patch("os.path.exists", return_value=True)
+    def test_retry_reopens_file_fresh_each_attempt(
+        self, _mock_exists, mock_post, mock_get_settings, _mock_sleep,
+    ):
+        mock_get_settings.return_value = self.fake_settings
+        protocol_error = Exception("Connection aborted.", TimeoutError("timed out"))
+        success_resp = MagicMock(status_code=201)
+        success_resp.json.return_value = {
+            "friendly_token": "tok-2",
+            "media_url": "https://cms.example.com/m/tok-2",
+        }
+        mock_post.side_effect = [requests.ConnectionError(protocol_error), success_resp]
+
+        m_open = mock_open(read_data=b"video-bytes")
+        with patch("builtins.open", m_open):
+            result = upload_video_asset(
+                video_path="/tmp/video.mp4",
+                title="T",
+                api_url="https://cms.example.com/api/v1/media",
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(m_open.call_count, 2)
 
 
 if __name__ == "__main__":

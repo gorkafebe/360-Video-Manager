@@ -416,7 +416,14 @@ def compute_global_geometry_evidence(
             "reprojection_error": reproj_error,
             "quality": quality,
             "eac_score": quality,
-            "cubic_score": 1.0 - quality,
+            "cubic_score": quality,
+            # NOTE: both scores are identical because `quality` is a generic
+            # homography-fit scalar with no connection to either projection
+            # format.  Setting them equal makes this channel neutral (neither
+            # EAC nor Cubic gains a directional advantage from geometry
+            # evidence).  A proper format-specific implementation would compute
+            # two independent reprojection-error measurements (one per atlas
+            # seam model), which is out of scope for this change.
         }
     except Exception:
         return {"valid": False, "inlier_ratio": 0.0, "reprojection_error": 999.0, "quality": 0.0}

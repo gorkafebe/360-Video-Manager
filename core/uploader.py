@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from typing import Dict, List, Optional, Any
 from urllib.parse import urljoin, urlparse
 
@@ -30,6 +31,41 @@ _CONNECT_TIMEOUT = 10
 _READ_TIMEOUT = 300
 _REQUEST_TIMEOUT = (_CONNECT_TIMEOUT, _READ_TIMEOUT)
 _RESPONSE_PREVIEW_MAX_LENGTH = 200
+
+# A fixed read timeout is too short for large video uploads on slow
+# connections (the body can still be sending when it fires) yet needlessly
+# long for small ones, so the upload read timeout scales with file size.
+_UPLOAD_SECONDS_PER_MB = 2  # ~0.5 MB/s minimum assumed upload throughput
+_UPLOAD_MAX_READ_TIMEOUT = 3600
+
+_UPLOAD_RETRY_MAX_ATTEMPTS = 3       # total attempts including the first (2 retries)
+_UPLOAD_RETRY_BACKOFF_SECONDS = 2.0  # base delay; doubles each retry (2s, 4s)
+
+
+def _upload_timeout(video_path: str) -> tuple[int, int]:
+    """Return a (connect, read) timeout scaled to *video_path*'s size."""
+    try:
+        size_mb = os.path.getsize(video_path) / (1024 * 1024)
+    except OSError:
+        return _REQUEST_TIMEOUT
+    read_timeout = min(
+        _UPLOAD_MAX_READ_TIMEOUT,
+        max(_READ_TIMEOUT, int(size_mb * _UPLOAD_SECONDS_PER_MB)),
+    )
+    return (_CONNECT_TIMEOUT, read_timeout)
+
+
+def _is_disguised_timeout(exc: Exception) -> bool:
+    """Detect a send-phase socket timeout hiding inside a ConnectionError.
+
+    urllib3 only maps a socket timeout to ``requests.Timeout`` when it occurs
+    while waiting for a response. A timeout while still pushing the upload
+    body (common for large files on slow connections) is instead wrapped as
+    a generic ConnectionError whose inner cause is a TimeoutError.
+    """
+    cause = exc.args[0] if exc.args else None
+    inner_args = getattr(cause, "args", ())
+    return any(isinstance(arg, TimeoutError) for arg in inner_args)
 
 
 def _get_auth():
@@ -214,7 +250,9 @@ def upload_video_asset(
         :class:`~core.models.UploadResult` describing the outcome.
 
     Raises:
-        MediaCMSError: On unrecoverable upload failures.
+        MediaCMSError: On unrecoverable upload failures.  A send-phase
+            socket timeout (the body never fully reached the server) is
+            retried internally before raising.
     """
     import requests  # type: ignore
     if not video_path or not os.path.exists(video_path):
@@ -237,16 +275,28 @@ def upload_video_asset(
         data["tags"] = ",".join(clean_tags)
 
     try:
-        with open(video_path, "rb") as fh:
-            files = {"media_file": (os.path.basename(video_path), fh, "video/mp4")}
-            response = requests.post(
-                url,
-                headers=headers,
-                files=files,
-                data=data,
-                auth=auth,
-                timeout=_REQUEST_TIMEOUT,
-            )
+        for attempt in range(1, _UPLOAD_RETRY_MAX_ATTEMPTS + 1):
+            try:
+                with open(video_path, "rb") as fh:
+                    files = {"media_file": (os.path.basename(video_path), fh, "video/mp4")}
+                    response = requests.post(
+                        url,
+                        headers=headers,
+                        files=files,
+                        data=data,
+                        auth=auth,
+                        timeout=_upload_timeout(video_path),
+                    )
+                break
+            except requests.ConnectionError as exc:
+                if not _is_disguised_timeout(exc) or attempt >= _UPLOAD_RETRY_MAX_ATTEMPTS:
+                    raise
+                delay = _UPLOAD_RETRY_BACKOFF_SECONDS * (2 ** (attempt - 1))
+                logger.warning(
+                    "Upload attempt %d/%d hit a disguised send-phase timeout; retrying in %.0fs.",
+                    attempt, _UPLOAD_RETRY_MAX_ATTEMPTS, delay,
+                )
+                time.sleep(delay)
 
         if response.status_code not in (200, 201):
             return UploadResult(
@@ -279,6 +329,13 @@ def upload_video_asset(
         raise MediaCMSError(
             "Upload timed out. Check CMS_API_URL and network connectivity."
         ) from exc
+    except requests.ConnectionError as exc:
+        if _is_disguised_timeout(exc):
+            raise MediaCMSError(
+                "Upload timed out or the connection was lost mid-transfer. "
+                "Check CMS_API_URL, network connectivity, and file size."
+            ) from exc
+        raise MediaCMSError(f"Upload error: {exc}") from exc
     except MediaCMSError:
         raise
     except Exception as exc:

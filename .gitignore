@@ -1,3 +1,8 @@
+# ── Internal development artifacts (not part of the deployable repo) ─────────
+IMPROVEMENT_PLAN.md
+prompts/
+skills/
+
 # ── Credentials & secrets ────────────────────────────────────────────────────
 .env
 .env.*

@@ -30,11 +30,6 @@ If inspection is incomplete, stop and refuse to proceed.
 - Runtime configuration: environment + `.env` (`config/settings.py`)
 - Persistent artifacts: `data/` runtime dirs + JSON manifests (`core/job_manifest.py`)
 
-### Important repository constraint
-
-The repository tracks a committed virtual environment (`bin/`, `lib/`, `share/`, `pyvenv.cfg`).  
-Agents must treat these as locked runtime artifacts and must not modify them unless explicitly requested.
-
 ## Architectural boundaries
 
 - GUI layer (`app/gui/gui_app.py`) orchestrates user interaction only; it delegates processing to `workflows.unified_pipeline`.
@@ -73,7 +68,7 @@ Do not bypass these boundaries with cross-layer shortcuts.
 
 ## Validation rules
 
-- Baseline test command: `./bin/python -m pytest tests/ -v`
+- Baseline test command: `python -m pytest tests/ -v`   # run from within the activated .venv
 - In Linux environments, test collection may fail without `tkinter` (required by GUI imports in tests).
 - No GitHub Actions workflow files are present under `.github/workflows/`; do not assume CI definitions not in repo.
 

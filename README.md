@@ -2,72 +2,40 @@
 
 Download, detect, convert, and upload 360° videos — via GUI.
 
-360-Video-Manager is a Python application that combines a deterministic
-projection-detection engine (no ML models required) with a complete
-download → process → upload workflow for 360° video content.
+---
+
+## What this does
+
+360-Video-Manager is a Python desktop application with a CustomTkinter GUI
+that takes a 360° video from a YouTube search (or a local file) through a
+complete pipeline: download → projection detection → format conversion →
+upload to a MediaCMS instance. Projection detection (equirectangular vs.
+stereo vs. EAC vs. cubemap) is fully deterministic — it relies on classical
+computer-vision techniques (Hough/LSD line detection, histogram comparison,
+optical flow, FFT analysis) and requires no ML models or GPU.
 
 ---
 
 ## Table of Contents
 
-- [Architecture](#architecture)
-- [Agent governance artifacts](#agent-governance-artifacts)
 - [Prerequisites](#prerequisites)
 - [Setup](#setup)
 - [Configuration](#configuration)
-- [Usage — GUI](#usage--gui)
+- [Running the app](#running-the-app)
+- [Architecture](#architecture)
 - [Pipeline stages](#pipeline-stages)
 - [Projection types](#projection-types)
 - [Output artifacts](#output-artifacts)
 - [Environment variables](#environment-variables)
-- [Testing](#testing)
+- [Running tests](#running-tests)
 - [Known issues / caveats](#known-issues--caveats)
+- [Agent governance](#agent-governance)
 
 ---
 
-## Architecture
-
-```
-app/
-  main.py               Entry point: launches the GUI
-  gui/
-    gui_app.py          CustomTkinter GUI (no pipeline logic)
-    progress_utils.py   Download progress parsing and rate-limiting helpers
-config/
-  settings.py           All configuration loaded from env / .env
-  logging_config.py     Console and file log handlers
-core/
-  downloader.py         yt-dlp wrapper
-  youtube.py            YouTube Data API search and thumbnail helpers
-  uploader.py           MediaCMS HTTP upload client
-  preview_frames.py     JPEG preview-frame extraction (UI thumbnails)
-  models.py             JobResult, DetectorStats, UploadResult dataclasses
-  job_manifest.py       JSON manifest persistence (data/jobs/)
-detector/
-  pipeline.py           Main detection orchestrator
-  video_io.py           OpenCV frame extraction + ffmpeg codec-normalisation fallback
-  line_detection.py     Horizontal / vertical seam detection
-  stereo_detection.py   Histogram-based stereo-equirectangular detection
-  motion_analysis.py    Optical-flow backends + region and geometry evidence scoring
-  projection_logic.py   EAC vs cubemap hypothesis scoring
-  equirectangular_detection.py  Wrap-around boundary-continuity evidence
-  projection_conversion.py      ffmpeg v360 conversion
-  preprocessing.py      Frame pre-processing helpers
-  region_validation.py  Region filtering
-  debug_utils.py        All debug-image and log I/O
-workflows/
-  unified_pipeline.py   Orchestration: download → normalise → detect → convert → upload
-utils/
-  exceptions.py         Exception hierarchy
-  paths.py              Path helpers
-tests/
-  test_progress_and_downloader.py
-  test_fallback_and_adaptive.py
-```
-
 ## Prerequisites
 
-- Python 3.9+
+- **Python 3.9+**
 - **ffmpeg** on `PATH` — required for codec normalisation and equirectangular
   conversion. Install via your system package manager:
   ```bash
@@ -75,8 +43,8 @@ tests/
   sudo dnf install ffmpeg          # Fedora / RHEL
   brew install ffmpeg              # macOS (Homebrew)
   ```
-- **tkinter** — not bundled by default on some Linux Python builds; install the system
-  package before running the GUI:
+- **tkinter** — not bundled by default on some Linux Python builds; install
+  the system package before running the GUI:
   ```bash
   sudo apt install python3-tk      # Debian / Ubuntu
   sudo dnf install python3-tkinter # Fedora / RHEL
@@ -86,38 +54,43 @@ tests/
 
 ## Setup
 
-```bash
-git clone <repo>
-cd 360-Video-Manager
-
-# Create and activate a local virtual environment
-python3 -m venv .venv
-source .venv/bin/activate          # Linux / macOS
-# .venv\Scripts\Activate.ps1       # Windows PowerShell
-
-pip install -r requirements.txt
-```
-
-Or use the one-command helper:
+### Option A — one command
 
 ```bash
 ./scripts/setup.sh
 source .venv/bin/activate
 ```
 
-> OpenCV dependency note: this project uses `opencv-contrib-python` (which
-> already includes core OpenCV modules). Do not install `opencv-python` in the
-> same environment.
+`scripts/setup.sh` checks for `python3` and `ffmpeg` on `PATH`, creates
+`.venv` if it doesn't exist, installs dependencies from `requirements.txt`,
+and verifies `tkinter` is importable.
 
-All subsequent commands must be run from the project root with the virtualenv
-active so that `app`, `config`, `core`, `detector`, `workflows`, and `utils`
-are importable as top-level packages.
+### Option B — manual
+
+```bash
+git clone <repo-url>
+cd 360-Video-Manager
+python3 -m venv .venv
+source .venv/bin/activate          # Linux / macOS
+# .venv\Scripts\Activate.ps1       # Windows PowerShell
+pip install -r requirements.txt
+```
+
+> **OpenCV dependency note**: this project uses `opencv-contrib-python`
+> (which already includes core OpenCV modules). Do not install
+> `opencv-python` in the same environment — having both installed causes
+> import conflicts.
+
+All subsequent commands must be run from the project root with the
+virtualenv active so that `app`, `config`, `core`, `detector`, `workflows`,
+and `utils` are importable as top-level packages.
 
 ---
 
 ## Configuration
 
-Copy `.env.example` to `.env` in the project root (or export the variables directly):
+Copy `.env.example` to `.env` in the project root (or export the variables
+directly):
 
 ```bash
 cp .env.example .env
@@ -143,12 +116,13 @@ VPD_DEBUG_OUTPUT_DIR=data/frames
 ```
 
 All variables are optional for detection-only workflows; YouTube search and
-MediaCMS upload will fail gracefully with a clear error when their credentials
-are missing.
+MediaCMS upload will fail gracefully with a clear error when their
+credentials are missing. The full reference of every recognised variable is
+in [Environment variables](#environment-variables) below.
 
 ---
 
-## Usage — GUI
+## Running the app
 
 ```bash
 python -m app.main
@@ -160,18 +134,65 @@ The GUI launches a CustomTkinter window. Workflow:
    Search. Results appear as scrollable cards.
 2. **Select** — click a result card to populate the detail panel with the
    title, channel, and URL.
-3. **Download & Process** — starts the unified pipeline in a background thread:
-   download → codec normalise → detect projection → convert if needed.
-   Progress and status are shown in the always-visible bottom bar.
-4. **Upload to CMS** — becomes available after a successful Download & Process.
-   Assign a title, optionally add personalized tags, and choose an existing
-   MediaCMS playlist or create a new one before uploading.
+3. **Download & Process** — starts the unified pipeline in a background
+   thread: download → codec normalise → detect projection → convert if
+   needed. Progress and status are shown in the always-visible bottom bar.
+4. **Upload to CMS** — becomes available after a successful Download &
+   Process. Assign a title, optionally add personalized tags, and choose an
+   existing MediaCMS playlist or create a new one before uploading.
 5. **Log panel** — toggled with the "Show log" button; displays structured
    pipeline log output in real time.
 
 The Download & Process and Upload buttons are always visible regardless of
 window size (they are anchored to a fixed bottom frame). The results, detail
 panel, and upload options are in a scrollable content area above.
+
+---
+
+## Architecture
+
+```
+app/
+  main.py               Entry point: launches the GUI
+  gui/
+    gui_app.py           CustomTkinter GUI (no pipeline logic)
+    progress_utils.py    Download progress parsing and rate-limiting helpers
+config/
+  settings.py           All configuration loaded from env / .env
+  logging_config.py     Console and file log handlers
+core/
+  downloader.py         yt-dlp wrapper
+  youtube.py             YouTube Data API search and thumbnail helpers
+  uploader.py            MediaCMS HTTP upload client
+  preview_frames.py      JPEG preview-frame extraction (UI thumbnails)
+  models.py               JobResult, DetectorStats, UploadResult dataclasses
+  job_manifest.py         JSON manifest persistence (data/jobs/)
+detector/
+  pipeline.py            Main detection orchestrator
+  video_io.py             OpenCV frame extraction + ffmpeg codec-normalisation fallback
+  line_detection.py       Horizontal / vertical seam detection
+  stereo_detection.py     Histogram-based stereo-equirectangular detection
+  motion_analysis.py      Optical-flow backends + region and geometry evidence scoring
+  projection_logic.py     EAC vs cubemap hypothesis scoring
+  equirectangular_detection.py  Wrap-around boundary-continuity evidence
+  projection_conversion.py      ffmpeg v360 conversion
+  preprocessing.py        Frame pre-processing helpers
+  region_validation.py    Region filtering
+  debug_utils.py          All debug-image and log I/O
+workflows/
+  unified_pipeline.py    Orchestration: download → normalise → detect → convert → upload
+utils/
+  exceptions.py          Exception hierarchy
+  paths.py                Path helpers
+scripts/
+  setup.sh                One-command environment bootstrap
+  diagnose_line_detection.py  Standalone CLI tool for tuning line-detection thresholds
+packaging/
+  build_app.spec          PyInstaller spec for the standalone desktop executable
+  README_build.md         How to build the executable (see that file for details)
+tests/
+  test_*.py               Unit tests (see Running tests below)
+```
 
 ---
 
@@ -316,6 +337,12 @@ root. Defaults shown are the values used when a variable is not set.
 | `VPD_LINE_MIN_COVERAGE_RATIO` | `0.20` | Minimum seam coverage fraction across frame width |
 | `VPD_LINE_MIN_QUALITY_SCORE` | `0.62` | Minimum seam structural quality score for non-fallback candidates |
 | `VPD_LINE_FALLBACK_MIN_QUALITY_SCORE` | `0.78` | Minimum seam quality score for fallback (LSD/fitLine) candidates |
+| `VPD_LINE_FFT_MIN_DOMINANCE` | `0.10` | Minimum FFT horizontal-energy dominance; raise to reduce false positives |
+| `VPD_LINE_STRONG_COVERAGE_RATIO` | `0.40` | Fraction of frame dimension at which the slope-tightness requirement is relaxed |
+| `VPD_LINE_MORPH_LENGTH_RATIO` | `0.02` | Morphological close kernel length ratio; reduce to prevent fragment bridging |
+| `VPD_LINE_ENABLE_PROFILE_GATE` | `false` | Set `true` to make the spatial projection-profile check a hard gate (advisory-only by default) |
+| `VPD_LINE_PROFILE_MIN_COVERAGE_RATIO` | `0.20` | Fraction of frame columns/rows that must agree on the profile peak location |
+| `VPD_LINE_PROFILE_MIN_PROMINENCE` | `3.0` | Peak / median gradient ratio for the profile gate; raise for stricter rejection |
 | `VPD_STEREO_HIST_THRESHOLD` | `0.92` | Histogram correlation threshold for stereo detection |
 | `VPD_STEREO_SEAM_GUARD_RATIO` | `0.02` | Guard band excluded around detected seam before top/bottom (or left/right) comparison |
 | `VPD_STEREO_MIN_VALID_HALF_RATIO` | `0.22` | Minimum usable side/half size ratio required after seam-guard cropping |
@@ -351,12 +378,16 @@ Safety invariants:
 
 ---
 
-## Testing
+## Running tests
 
 ```bash
 # Run the full test suite (from project root, virtualenv active)
 python -m pytest tests/ -v
 ```
+
+On Linux, full test collection requires `tkinter` to be installed (see
+[Prerequisites](#prerequisites)) — without it, tests that import GUI modules
+fail at collection time.
 
 Current test files:
 
@@ -379,12 +410,6 @@ Current test files:
 
 ## Known issues / caveats
 
-### tkinter system dependency
-
-On Linux environments where tkinter is missing, importing `app.gui.gui_app`
-will fail and tests that import GUI modules will fail at collection time.
-Install `python3-tk` / `python3-tkinter` before running the GUI or full tests.
-
 ### Cubemap layout assumption
 
 Conversion of `cubic` projection assumes the 3×2 face layout (`ffmpeg v360=c3x2:equirect`).
@@ -398,17 +423,23 @@ The motion-analysis branch requires sufficient camera or scene motion. Near-
 static 360° content may produce low-confidence results and a final classification
 of `unknown`, which then triggers the EAC fallback during conversion.
 
+### tkinter system dependency
+
+On Linux environments where tkinter is missing, importing `app.gui.gui_app`
+will fail and tests that import GUI modules will fail at collection time.
+Install `python3-tk` / `python3-tkinter` before running the GUI or full tests.
+
 ---
 
-## Agent governance artifacts
+## Agent governance
 
-This repository now includes agent-governance artifacts grounded in the current
-implementation:
+`AGENTS.md` contains operational constraints for AI coding agents working on
+this repository.
 
-- `AGENTS.md` — repository-specific operational and safety constraints for autonomous agents.
-- `skills/unified-pipeline-contract/SKILL.md` — stage-order and result-contract enforcement.
-- `skills/projection-detection-reliability/SKILL.md` — detector reliability-policy enforcement.
-- `skills/conversion-fallback-integrity/SKILL.md` — conversion mapping and fallback safety.
-- `prompts/analyze-repository.md` — explicit read-only repository audit prompt.
-- `prompts/audit-detection-policy.md` — explicit detector policy audit prompt.
-- `prompts/plan-controlled-refactor.md` — explicit constrained-refactor planning prompt.
+---
+
+## Building a standalone executable
+
+For deploying to machines without Python installed, see
+[`packaging/README_build.md`](packaging/README_build.md) for instructions on
+building a double-clickable executable with PyInstaller.
